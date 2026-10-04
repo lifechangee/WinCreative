@@ -1,0 +1,27 @@
+// Adjustment sessions use history interceptors: their internal undo must not leak into the time-lapse (no undo frames, no extra states).
+import { _electron as electron } from 'playwright-core'
+import os from 'node:os'; import path from 'node:path'
+const ud = path.join(os.tmpdir(), 'bw-tls-' + Date.now())
+const app = await electron.launch({ args: ['out-tl/main/index.js', '--user-data-dir=' + ud], cwd: process.cwd(), env: { ...process.env, APPDATA: ud, BW_LANG: 'en' }, timeout: 60000 })
+const page = await app.firstWindow(); page.setDefaultTimeout(15000)
+await page.waitForTimeout(3000)
+await page.setViewportSize({ width: 1280, height: 720 }).catch(() => {})
+await page.locator('button', { hasText: /^(Закрыть|Close)$/ }).first().click({ timeout: 2000 }).catch(() => {})
+await page.evaluate(() => window.brushwork_app.newDocument(1200, 800)); await page.waitForTimeout(1200)
+const tags = () => page.evaluate(async () => (await window.brushwork_animio.tl.current.tags()).map((x) => `${x.t}:${x.s}`).join(' '))
+await page.mouse.move(300, 200); await page.mouse.down(); for (let i = 0; i < 20; i++) await page.mouse.move(300 + i * 25, 220, { steps: 2 }); await page.mouse.up(); await page.waitForTimeout(600)
+console.log('before', await tags())
+const ids = await page.evaluate(() => window.brushwork_app.adjustments.definitions.map((d) => d.id).slice(0, 6))
+await page.evaluate((id) => window.brushwork_app.adjustments.open(id), ids[0]); await page.waitForTimeout(800)
+await page.keyboard.press('Control+z'); await page.waitForTimeout(300)   // consumed by the session
+await page.keyboard.press('Control+z'); await page.waitForTimeout(300)
+const cancel = page.locator('.adj-bar button', { hasText: /Cancel|Отмена/ }).first()
+if (await cancel.count()) await cancel.click()
+await page.waitForTimeout(700)
+console.log('after session cancel', await tags(), 'pushes', await page.evaluate(() => window.brushwork_app.doc.history.pushes), 'undos', await page.evaluate(() => window.brushwork_app.doc.history.undos))
+await page.evaluate((id) => window.brushwork_app.adjustments.open(id), ids[0]); await page.waitForTimeout(800)
+const apply = page.locator('.adj-bar button', { hasText: /Apply|Применить|Done|Готово/ }).first()
+if (await apply.count()) await apply.click()
+await page.waitForTimeout(900)
+console.log('after apply', await tags())
+await app.close()

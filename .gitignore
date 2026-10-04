@@ -1,0 +1,34 @@
+# dependencies
+node_modules/
+
+# build output
+out/
+out-*/
+release/
+release-*/
+dist/
+
+# QA / test artefacts
+qa-screens/
+qa-brush/
+*.err
+*.out
+*.log
+lt.err
+lt.out
+
+# secrets / local config
+.env
+.env.*
+
+# local user-data dirs (Electron profiles used by test drivers)
+user-data/
+userdata/
+*-userdata/
+bw-*-qa-*/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

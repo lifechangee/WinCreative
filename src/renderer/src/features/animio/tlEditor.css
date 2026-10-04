@@ -1,0 +1,90 @@
+/* Time-lapse editor: full-window mode below the top bar */
+.tle { position: fixed; left: 0; right: 0; bottom: 0; top: var(--topbar-h); z-index: 90; background: var(--bg); color: var(--text); display: flex; flex-direction: column; min-height: 0; font-size: 13px; }
+.tle * { -webkit-user-select: none; user-select: none; }
+.tle input[type=text] { -webkit-user-select: text; user-select: text; }
+.tle-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); flex: none; min-height: 48px; }
+.tle-title { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-left: 6px; color: var(--dim); white-space: nowrap; }
+.tle-spacer { flex: 1; min-width: 4px; }
+.tle-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 14px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); cursor: pointer; white-space: normal; text-align: center; line-height: 1.15; touch-action: manipulation; }
+.tle-btn:hover:not([disabled]) { background: #3d3d43; }
+.tle-btn[disabled] { opacity: .4; cursor: default; }
+.tle-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tle-btn.primary:hover:not([disabled]) { background: #4f90f8; }
+.tle-btn.tle-icon { width: 40px; min-width: 40px; padding: 0; }
+.tle-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tle-back { padding-left: 10px; }
+.tle-main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+.tle-stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.tle-preview { flex: 1; min-height: 0; position: relative; padding: 12px; background: #141416; overflow: hidden; }
+.tle-frame { position: relative; width: 100%; height: 100%; }
+.tle-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.tle-fade { position: absolute; inset: -12px; background: #000; opacity: 0; pointer-events: none; }
+.tle-transport { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); flex-wrap: wrap; flex: none; }
+.tle-play { width: 52px; min-width: 52px; }
+.tle-readout { display: flex; flex-direction: column; margin-left: 10px; line-height: 1.25; min-width: 120px; }
+.tle-time { font-variant-numeric: tabular-nums; font-weight: 600; }
+.tle-dim { color: var(--dim); font-size: 12px; }
+.tle-rate { color: var(--accent); font-weight: 600; margin-left: 6px; }
+.tle-keys { color: var(--dim); font-size: 11px; max-width: 420px; text-align: right; }
+.tle-side { border-left: 1px solid var(--line); overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; min-height: 0; background: var(--bg); }
+.tle-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.tle-card h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+.tle-row { display: flex; align-items: center; gap: 8px; }
+.tle-row label { flex: 1; min-width: 0; color: var(--dim); white-space: normal; }
+.tle-num { width: 84px; flex: none; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; text-align: right; font: inherit; min-height: 34px; }
+.tle-num.short { width: 64px; }
+.tle-num:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.tle-card input[type=range], .tle-tlbar input[type=range] { width: 100%; accent-color: var(--accent); min-height: 24px; }
+.tle-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.tle-chip { padding: 6px 12px; min-height: 32px; border-radius: 16px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); cursor: pointer; }
+.tle-chip:hover { background: #3d3d43; }
+.tle-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.tle-btns .tle-btn { flex: 1 1 auto; }
+.tle-note { margin: 0; color: var(--dim); font-size: 12px; line-height: 1.4; white-space: normal; }
+.tle-note.warn, .tle-warn { color: #f5a524; }
+.tle-warn { margin: 0; font-size: 12px; }
+.tle-warn:empty { display: none; }
+.tle-switch { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; min-height: 28px; white-space: normal; }
+.tle-switch input { width: 20px; height: 20px; margin: 1px 0 0; accent-color: var(--accent); flex: none; }
+.tle-selform { display: flex; flex-direction: column; gap: 8px; }
+.tle-breakdown { border-top: 1px solid var(--line); padding-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.tle-bd { display: flex; justify-content: space-between; gap: 8px; color: var(--dim); }
+.tle-bd b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tle-bd:nth-child(4) { border-top: 1px solid var(--line); margin-top: 3px; padding-top: 4px; color: var(--text); }
+
+/* timeline */
+.tle-tl { flex: none; border-top: 1px solid var(--line); background: var(--panel); padding: 6px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.tle-tlbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tle-tlbar .tle-btn { min-height: 34px; padding: 4px 12px; }
+.tle-tlbar .tle-btn.tle-icon { width: 36px; min-width: 36px; }
+.tle-zoom { width: 150px !important; flex: none; }
+.tle-tlwrap { position: relative; }
+.tle-lane-labels { position: absolute; left: 6px; top: 0; z-index: 3; pointer-events: none; }
+.tle-lane-labels span { position: absolute; left: 0; display: flex; align-items: center; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); text-shadow: 0 0 3px var(--panel), 0 0 3px var(--panel); }
+.tle-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--line); border-radius: 10px; background: #1b1b1e; position: relative; scrollbar-width: thin; }
+.tle-inner { position: relative; min-width: 100%; touch-action: none; cursor: pointer; }
+.tle-cv { position: sticky; left: 0; top: 0; display: block; pointer-events: none; }
+.tle-ph { position: absolute; top: 0; bottom: 0; left: 0; width: 0; z-index: 6; pointer-events: none; }
+.tle-ph::before { content: ''; position: absolute; left: -1px; top: 0; bottom: 0; width: 2px; background: #ff4d5e; }
+.tle-ph i { position: absolute; left: -6px; top: 0; border: 6px solid transparent; border-top: 9px solid #ff4d5e; border-bottom: 0; }
+.tle-range { display: none; position: absolute; background: rgba(59, 130, 246, .35); border: 1px solid var(--accent); border-radius: 6px; pointer-events: none; z-index: 4; }
+.tle-band { position: absolute; border-radius: 7px; z-index: 4; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600; font-size: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.35); touch-action: none; cursor: pointer; }
+.tle-band.sel { outline: 2px solid #fff; z-index: 5; }
+.tle-band .lbl { pointer-events: none; text-shadow: 0 1px 2px #0008; white-space: nowrap; }
+.tle-band .edge { position: absolute; top: 0; bottom: 0; width: 14px; cursor: ew-resize; background: rgba(255,255,255,.18); }
+.tle-band .edge.l { left: 0; }
+.tle-band .edge.r { right: 0; }
+.tle-pause { position: absolute; width: 0; z-index: 5; pointer-events: none; }
+.tle-pause .line { position: absolute; left: -1px; top: 0; bottom: 0; width: 2px; background: #f5a524; opacity: .75; }
+.tle-pause .pill { position: absolute; left: -3px; bottom: 3px; height: 26px; display: flex; align-items: center; gap: 4px; padding: 0 0 0 7px; border-radius: 13px; background: #f5a524; color: #1c1c1e; font-weight: 700; font-size: 12px; pointer-events: auto; cursor: grab; touch-action: none; white-space: nowrap; }
+.tle-pause.sel .pill { outline: 2px solid #fff; }
+.tle-pause .grip { display: block; width: 18px; align-self: stretch; margin-left: 2px; border-radius: 0 13px 13px 0; background: rgba(0,0,0,.22); cursor: ew-resize; position: relative; }
+.tle-pause .grip::before { content: ''; position: absolute; left: 7px; top: 7px; bottom: 7px; width: 2px; border-radius: 1px; background: rgba(0,0,0,.55); }
+
+@media (max-width: 1100px) { .tle-main { grid-template-columns: minmax(0, 1fr) 286px; } .tle-keys { display: none; } }
+@media (max-height: 760px) { .tle-head { min-height: 42px; padding: 3px 12px; } .tle-tl { padding-bottom: 6px; } .tle-preview { min-height: 90px; padding: 8px; } }
+@media (prefers-reduced-motion: reduce) { .tle * { transition: none !important; } }
+
+/* six top-bar tabs: keep the centred document title clear of the (longer) Russian tab row */
+.tb-left .tb-btn { padding-left: 10px; padding-right: 10px; }
+@media (max-width: 1500px) { .tb-title { left: calc(50% + 44px); max-width: 24vw; overflow: hidden; text-overflow: ellipsis; } }

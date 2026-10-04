@@ -1,0 +1,105 @@
+{
+  "name": "wincreative",
+  "version": "0.2.0",
+  "description": "WinCreative - a Procreate-inspired painting app for Windows",
+  "license": "AGPL-3.0-or-later",
+  "homepage": "https://github.com/lifechangee/WinCreative",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lifechangee/WinCreative.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lifechangee/WinCreative/issues"
+  },
+  "main": "out/main/index.js",
+  "author": "WinCreative contributors",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && electron-vite build",
+    "start": "electron-vite preview",
+    "dist": "npm run build && electron-builder --win",
+    "test": "vitest run",
+    "selftest": "node scripts/selftest.mjs",
+    "i18n:check": "node scripts/i18n-check.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "playwright-core": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6",
+    "vitest": "^5.0.2"
+  },
+  "dependencies": {
+    "ag-psd": "^31.0.2",
+    "fflate": "^0.8.3",
+    "ffmpeg-static": "^5.3.0",
+    "pdf-lib": "^1.17.1",
+    "utif": "^3.1.0"
+  },
+  "build": {
+    "appId": "com.wincreative.app",
+    "productName": "WinCreative",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico",
+      "legalTrademarks": "WinCreative"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "WinCreative-Setup-${version}.${ext}",
+      "shortcutName": "WinCreative",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    },
+    "portable": {
+      "artifactName": "WinCreative-Portable-${version}.${ext}"
+    },
+    "copyright": "Copyright (c) 2026 WinCreative contributors",
+    "fileAssociations": [
+      {
+        "ext": "bwk",
+        "name": "WinCreative Document",
+        "description": "WinCreative Document",
+        "icon": "build/icon.ico",
+        "role": "Editor"
+      }
+    ],
+    "extraResources": [
+      {
+        "from": "LICENSE",
+        "to": "licenses/LICENSE-AGPL-3.0.txt"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "licenses/THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "node_modules/ffmpeg-static/ffmpeg.exe.LICENSE",
+        "to": "licenses/ffmpeg-GPL-3.0.txt"
+      },
+      {
+        "from": "node_modules/ffmpeg-static/ffmpeg.exe.README",
+        "to": "licenses/ffmpeg-README.txt"
+      }
+    ]
+  }
+}
