@@ -100,6 +100,8 @@ const dict: Record<string, string> = {
   'layers.options.fillLayer': 'Залить слой',
   'layers.options.clear': 'Очистить',
   'layers.options.clippingMask': 'Обтравочная маска',
+  'layers.options.clippingOnGroup': 'Обтравочной маске нужен слой под ней: группа не может быть основой',
+  'layers.options.clippingOnLangRow': 'Обтравочной маске нужен слой под ней: языковой слой не может быть основой',
   'layers.options.invert': 'Инвертировать',
   'layers.options.drawingAssist': 'Рисование с помощью',
 

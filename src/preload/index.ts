@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer, webFrame } from 'electron'
 import './animio'
 import './gallery'
+import './smartselect'
+import './scratch'
 
 webFrame.setVisualZoomLevelLimits(1, 1)
 
@@ -33,7 +35,15 @@ const api = {
   selfTestContent: (): Promise<{ w: number; h: number; zoom: number } | null> => ipcRenderer.invoke('selftest:content'),
   selfTestWindow: (op: string): Promise<void> => ipcRenderer.invoke('selftest:window', op),
   selfTestShot:(tag: string): Promise<void> => ipcRenderer.invoke('selftest:shot', tag),
-  selfTestDone: (info: { ok: boolean }): Promise<void> => ipcRenderer.invoke('selftest:done', info)
+  selfTestDone: (info: { ok: boolean }): Promise<void> => ipcRenderer.invoke('selftest:done', info),
+  /** append a line to the local diagnostics log (<userData>/logs/diag.log) */
+  diag: (line: string): void => ipcRenderer.send('diag:log', line),
+  /** translated notice when this page load follows a crash / GPU reset (null otherwise; returned once) */
+  takeRecoveryNotice: (): Promise<string | null> => ipcRenderer.invoke('app:takeRecoveryNotice'),
+  /** the WebGL context is gone for good: ask main to reload the window (the last artwork reopens from the autosave) */
+  gpuLost: (): void => ipcRenderer.send('app:gpuLost'),
+  /** self-test only: kill the renderer process */
+  selfTestCrash: (): Promise<void> => ipcRenderer.invoke('selftest:crashRenderer')
 }
 contextBridge.exposeInMainWorld('brushwork', api)
 // layers feature: OS clipboard images

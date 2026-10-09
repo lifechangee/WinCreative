@@ -312,3 +312,39 @@ export function softenPatch(p: MaskPatch, w: number, h: number): MaskPatch {
   }
   return { rect, data }
 }
+
+// ---------------------------------------------------------------- rect-relative variants (infinite canvas: no 0..w canvas)
+const shiftPatch = (p: MaskPatch | null, dx: number, dy: number): MaskPatch | null => (p ? { rect: { x: p.rect.x + dx, y: p.rect.y + dy, w: p.rect.w, h: p.rect.h }, data: p.data } : null)
+
+/** rasterizePolygon limited to `clip` (document space, any position). The patch rect is in document space. */
+export function rasterizePolygonIn(pts: Pt[], clip: Rect): MaskPatch | null {
+  const t = pts.map((p) => ({ x: p.x - clip.x, y: p.y - clip.y }))
+  return shiftPatch(rasterizePolygon(t, clip.w, clip.h), clip.x, clip.y)
+}
+
+/** floodFill on pixels that cover document rect `area` (row 0 = area.y); seed and result in document space. */
+export function floodFillIn(px: Uint8ClampedArray | Uint8Array, area: Rect, sx: number, sy: number, tol: number): MaskPatch | null {
+  return shiftPatch(floodFill(px, area.w, area.h, sx - area.x, sy - area.y, tol), area.x, area.y)
+}
+
+/** softenPatch limited to `clip` (document space). */
+export function softenPatchIn(p: MaskPatch, clip: Rect): MaskPatch {
+  const q = shiftPatch(p, -clip.x, -clip.y)!
+  return shiftPatch(softenPatch(q, clip.w, clip.h), clip.x, clip.y)!
+}
+
+/** Bounding rect of a polygon, grown by 1 px and limited to `max` px per side (anchored at the top-left). `clipped` = the limit was hit. */
+export function polygonClip(pts: Pt[], max: number): { rect: Rect; clipped: boolean } {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  for (const p of pts) {
+    if (p.x < x0) x0 = p.x
+    if (p.y < y0) y0 = p.y
+    if (p.x > x1) x1 = p.x
+    if (p.y > y1) y1 = p.y
+  }
+  const x = Math.floor(x0) - 1
+  const y = Math.floor(y0) - 1
+  const w = Math.ceil(x1) + 1 - x
+  const h = Math.ceil(y1) + 1 - y
+  return { rect: { x, y, w: Math.min(w, max), h: Math.min(h, max) }, clipped: w > max || h > max }
+}

@@ -11,6 +11,10 @@ Electron + TypeScript + electron-vite, with a WebGL2 painting engine.
 
 ## Features
 
+* **Infinite canvas**: paint in any direction without bounds; layers stored as sparse tiles with automatic GPU paging.
+* **Frame**: one frame per document with presets (9:16, 16:9, 1:1, 4:5, A4, custom); toggle while drawing (Ctrl+Shift+F); defines the export and time-lapse area.
+* **Language variants**: one drawing session, one time-lapse video per language: common artwork on ordinary layers, per-language writing on a language layer, separate edits and voice-over length per version, side-by-side comparison and one-pass export (`name.en.mp4`, `name.ru.mp4`).
+* **Smart selection**: select objects in imported pictures with one click (on-device neural network, works offline); choose Fast (bundled) or Precise (optional download) AI mode, or Brush mode.
 * **Tablet support**: pressure, tilt, barrel rotation, pen eraser end, barrel buttons (remappable), hover cursor, editable pressure curve, tablet diagnostics. Works through Windows Ink / Pointer Events (Wacom, Huion, XP-Pen, Surface and others). Touch gestures: pinch/rotate/pan, multi-finger undo/redo.
 * **106 soft, anti-aliased brushes** in 19 sets, plus **Brush Studio** to build and tweak your own brushes. Import of `.brush`, `.brushset` and `.abr` is best-effort.
 * **Layers**: 26 blend modes, masks, groups, clipping, alpha lock, reference layers, merge/flatten.
@@ -59,16 +63,20 @@ npm run selftest   # in-app self tests (launches Electron)
 npm run i18n:check # look for hard-coded, untranslated UI strings
 ```
 
+The bundled selection model (~45 MB) is not stored in git and is fetched by `npm run models`.
+
 Project structure and design notes: [ARCHITECTURE.md](ARCHITECTURE.md). Feature checklist: [FEATURES.md](FEATURES.md).
 Localisation conventions: [docs/I18N.md](docs/I18N.md). The Playwright-based UI drivers (including the one that makes the screenshots above) live in `scripts/qa/`.
 
 ## Status and known limitations
 
-This is an **early version (0.2.0)**. It has been tested mostly with synthetic input and a few tablets, so expect rough edges with some devices and drivers.
+This is an **early version (0.4.0)**. It has been tested mostly with synthetic input and a few tablets, so expect rough edges with some devices and drivers.
 
 * `.procreate`, `.brush`, `.brushset` and `.abr` import is best-effort (the formats are undocumented).
 * No CMYK; color management is limited to sRGB-based profiles with ICC embedding.
 * Windows only.
+* On an infinite canvas, heavy tools (Liquify, blurs) work within the frame or the visible area.
+* Smart selection may miss very fine hairs with the Fast model.
 * Please report problems (with your tablet model and driver) in [Issues](https://github.com/lifechangee/WinCreative/issues).
 
 ## Contributing
@@ -84,8 +92,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 Copyright (C) 2026 WinCreative contributors
 ```
 
-The full text is in [LICENSE](LICENSE). Third-party components, including a bundled GPL-3.0 build of FFmpeg used for video export,
-are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The full text is in [LICENSE](LICENSE). Third-party components, including a bundled GPL-3.0 build of FFmpeg used for video export, and selection models MobileSAM (Apache-2.0) and SAM 2.1 (Apache-2.0), are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); onnxruntime-web is MIT.
 
 **FFmpeg sources.** The bundled `ffmpeg.exe` is FFmpeg 6.1.1 (gyan.dev "essentials" build, commit
 [`e38092ef93`](https://github.com/FFmpeg/FFmpeg/commit/e38092ef93)), fetched by

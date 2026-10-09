@@ -182,6 +182,15 @@ const dict: Record<string, string> = {
   'animio.info.pixelFormat': 'Pixel format',
   'animio.info.format16': '16-bit float per channel',
   'animio.info.format8': '8-bit per channel',
+  'animio.info.kind': 'Canvas type',
+  'animio.info.kindInfinite': 'Infinite (unbounded)',
+  'animio.info.tiles': 'Pixel tiles',
+  'animio.info.tilesValue': '{n} tiles · {mb} MB of GPU memory',
+  'animio.info.tiers': 'Memory tiers',
+  'animio.info.tiersValue': 'GPU {gpu} · compressed {cpu} ({cmb} MB) · on disk {disk} ({dmb} MB)',
+  'animio.info.content': 'Painted area',
+  'animio.info.contentValue': '{w} x {h} px, from ({x}, {y})',
+  'animio.info.contentNone': 'Nothing painted yet',
   'animio.info.stats': 'Stats',
   'animio.info.strokes': 'Strokes',
   'animio.info.timeSpent': 'Time spent',
@@ -324,5 +333,7 @@ const dict: Record<string, string> = {
   'animio.tle.cheat.delete': 'Delete selected pause or segment',
   'animio.tle.cheat.undo': 'Undo / redo edit',
   'animio.tle.cheat.back': 'Back to drawing',
+  'animio.share.psd.tooBig': 'Photoshop PSD supports at most {max} px per side; this canvas is {w} × {h} px. Export a flattened PNG instead.',
+  'animio.share.image.encoding': 'Encoding image… {pct}%',
 }
 export default dict

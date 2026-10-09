@@ -9,6 +9,9 @@ interface Cache {
   px: Uint8ClampedArray
   w: number
   h: number
+  /** document position of px[0] (infinite canvas: a small window read around the pointer) */
+  ox?: number
+  oy?: number
 }
 
 export type SampleFn = (docX: number, docY: number) => [number, number, number, number] | null
@@ -79,9 +82,19 @@ export class Eyedropper {
   private snapshot(): Cache {
     const { doc, compositor, gpu } = this.app
     const s = paletteStore().settings
+    if (doc.isInfinite) return { px: new Uint8ClampedArray(0), w: 0, h: 0 } // read on demand around the pointer (see local())
     const full = { x: 0, y: 0, w: doc.width, h: doc.height }
     const px = s.eyeSource === 'layer' ? gpu.readRGBA8(doc.activeLayer.surface, full) : compositor.readFlattened(true)
     return { px, w: doc.width, h: doc.height }
+  }
+
+  /** Infinite canvas: the pixels around (x,y) (a 24 px window) from the composite or the active layer. */
+  private local(x: number, y: number): Cache {
+    const { doc, compositor } = this.app
+    const R = 12
+    const rect = { x: x - R, y: y - R, w: 2 * R, h: 2 * R }
+    const px = paletteStore().settings.eyeSource === 'layer' ? doc.readRegionPixels(doc.activeLayer, rect) : compositor.readFlattened(rect, 1, true).px
+    return { px, w: 2 * R, h: 2 * R, ox: rect.x, oy: rect.y }
   }
 
   /** Average `size` x `size` block around a pixel (alpha-weighted). Returns straight RGBA 0..255 or null. */
@@ -202,13 +215,18 @@ export class Eyedropper {
 
   /** Sample at client coordinates, show the loupe, live-update the swatch. */
   private update(cx: number, cy: number): void {
-    const c = this.cache
+    let c = this.cache
     if (!c) return
     const r = this.app.canvas.getBoundingClientRect()
     const s = this.app.cssSize()
     const d = screenToDoc(this.app.view, cx - r.left, cy - r.top, s.w, s.h)
-    const x = Math.floor(d.x)
-    const y = Math.floor(d.y)
+    let x = Math.floor(d.x)
+    let y = Math.floor(d.y)
+    if (this.app.doc.isInfinite) {
+      c = this.local(x, y)
+      x -= c.ox ?? 0
+      y -= c.oy ?? 0
+    }
     const size = paletteStore().settings.eyeSize
     const v = Eyedropper.average(c, x, y, size)
     // loupe placement: above the pointer unless too close to the top edge

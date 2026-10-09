@@ -17,6 +17,7 @@ const CSS = `
 .adj-bar { position: fixed; top: calc(var(--topbar-h) + 8px); left: 50%; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 8px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 6px 10px; box-shadow: 0 8px 30px #0008; max-width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center; }
 .adj-bar .name { font-weight: 600; }
+.adj-bar .lim { font-size: 11px; color: var(--dim); max-width: 220px; }
 .adj-bar .val { min-width: 130px; text-align: center; color: #fff; background: var(--accent); border-radius: 9px; padding: 4px 10px; font-variant-numeric: tabular-nums; }
 .adj-bar .val.none { background: var(--panel2); color: var(--dim); }
 .adj-bar button, .adj-panel button.b { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
@@ -178,6 +179,7 @@ export class AdjustmentUI {
       'div',
       { class: 'adj-bar' },
       h('span', { class: 'name', text: adjName(s.def) }),
+      s.limit ? h('span', { class: 'lim', text: t('adjustments.ui.limit.' + s.limit), title: t('adjustments.ui.limit.tip') }) : null,
       seg.childElementCount ? seg : null,
       this.valEl,
       undo,
@@ -587,11 +589,10 @@ export class AdjustmentUI {
     if (!s || s.isClosed) return
     const size = this.app.cssSize()
     const v = this.app.view
-    const doc = this.app.doc
     if (s.def.params.some((p) => p.kind === 'point')) {
       if (!this.ptEl) this.overlay.append((this.ptEl = h('div', { class: 'pt' })))
       const [kx, ky] = this.pointKeys()
-      const p = docToScreen(v, s.params[kx] * doc.width, s.params[ky] * doc.height, size.w, size.h)
+      const p = docToScreen(v, s.inner.x + s.params[kx] * s.inner.w, s.inner.y + s.params[ky] * s.inner.h, size.w, size.h)
       this.ptEl.style.left = p.x + 'px'
       this.ptEl.style.top = p.y + 'px'
     }
@@ -608,7 +609,7 @@ export class AdjustmentUI {
   private updateRing(): void {
     const s = this.session
     if (!s || s.def.custom !== 'liquify' || !this.lastMouse) return void (this.ringEl.style.display = 'none')
-    const d = liquifyRadius(s.params.size, Math.max(this.app.doc.width, this.app.doc.height)) * 2 * this.app.view.zoom
+    const d = liquifyRadius(s.params.size, s.fx.maxDim) * 2 * this.app.view.zoom
     this.ringEl.style.cssText = `display:block;width:${d}px;height:${d}px;left:${this.lastMouse.x - d / 2}px;top:${this.lastMouse.y - d / 2}px`
   }
 
@@ -689,7 +690,7 @@ export class AdjustmentUI {
     const hasPoint = s.def.params.some((p) => p.kind === 'point')
     if (e.pointerType === 'pen' && (e.button === 5 || (e.buttons & 32) !== 0)) this.app.state.setTempEraser(true)
     if (s.def.custom === 'clone' && (e.altKey || this.pick === 'source')) {
-      ;(s.tool as CloneTool | null)?.setSource(smp.x, smp.y)
+      ;s.setCloneSource(smp.x, smp.y)
       this.ptrKind = 'source'
       if (this.pick === 'source') {
         this.pick = null
@@ -716,7 +717,7 @@ export class AdjustmentUI {
   private setPoint(smp: Sample): void {
     const s = this.session!
     const [kx, ky] = this.pointKeys()
-    s.setParam(kx, Math.min(1, Math.max(0, smp.x / this.app.doc.width)), ky, Math.min(1, Math.max(0, smp.y / this.app.doc.height)))
+    s.setParam(kx, Math.min(1, Math.max(0, (smp.x - s.inner.x) / s.inner.w)), ky, Math.min(1, Math.max(0, (smp.y - s.inner.y) / s.inner.h)))
   }
 
   private move = (e: PointerEvent): void => {

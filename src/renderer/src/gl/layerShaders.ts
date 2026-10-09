@@ -1,4 +1,5 @@
 import { BLEND_CHUNK, STROKE_CHUNK } from './shaders'
+import { CLIP_CHUNK } from './clipMask'
 
 /**
  * Layer compositing pass with masks, clipping and live-stroke overlay.
@@ -80,9 +81,8 @@ export const LAYER_OP_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uSrc;
 uniform sampler2D uMask;
-uniform sampler2D uSel;
-uniform float uSelOn;
 uniform int uOp;
+${CLIP_CHUNK}
 uniform vec3 uColor;
 uniform float uAlphaLock;
 in vec2 vUv;
@@ -90,10 +90,10 @@ out vec4 o;
 float lumOf(vec3 c){ return clamp(dot(c, vec3(0.3, 0.59, 0.11)), 0.0, 1.0); }
 void main(){
   vec4 s = texture(uSrc, vUv);
-  float sel = uSelOn > 0.5 ? texture(uSel, vUv).r : 1.0;
+  float sel = selCov(vUv);
   if (uOp == 4) { o = s * sel; return; }
   if (uOp == 5) { o = s * (1.0 - sel); return; }
-  if (uOp == 6) { o = vec4(vec3(texture(uSel, vUv).r), 1.0); return; }
+  if (uOp == 6) { o = vec4(vec3(selCov(vUv)), 1.0); return; }
   vec4 r = s;
   if (uOp == 0) r = uAlphaLock > 0.5 ? vec4(uColor * s.a, s.a) : vec4(uColor, 1.0);
   else if (uOp == 1) r = vec4(s.a - s.rgb, s.a);

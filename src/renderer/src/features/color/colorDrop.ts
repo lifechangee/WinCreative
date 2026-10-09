@@ -3,6 +3,8 @@ import { t } from '../../i18n'
 import { screenToDoc } from '../../core/viewTransform'
 import type { Rect } from '../../core/types'
 import type { Document } from '../../doc/document'
+import { LiveTileEdit } from '../../doc/tileEdit'
+import { workRect } from '../frame/workRect'
 import type { Layer } from '../../doc/layer'
 import type { PixelEdit } from '../../doc/pixelEdit'
 import { FS_VERT, GPU, Surface } from '../../gl/gpu'
@@ -20,18 +22,18 @@ import { paletteStore } from './paletteStore'
  */
 
 export type SelectionMask = Uint8Array // w*h coverage 0..255
-type SelectionProvider = (doc: Document) => SelectionMask | null
+type SelectionProvider = (doc: Document, rect?: Rect) => SelectionMask | null
 const providers: SelectionProvider[] = []
 
 /** Extension point: the selection feature registers a provider returning the active selection as a w*h mask. */
 export function registerSelectionMaskProvider(fn: SelectionProvider): void {
   providers.push(fn)
 }
-export function activeSelectionMask(doc: Document): SelectionMask | null {
+export function activeSelectionMask(doc: Document, rect?: Rect): SelectionMask | null {
   for (const p of providers) {
     try {
-      const m = p(doc)
-      if (m && m.length === doc.width * doc.height) return m
+      const m = p(doc, rect)
+      if (m && m.length === (rect ? rect.w * rect.h : doc.width * doc.height)) return m
     } catch (e) {
       console.error('[colorDrop] selection provider failed', e)
     }
@@ -44,7 +46,10 @@ precision highp float;
 uniform sampler2D uMask; uniform ivec2 uOrigin; uniform vec3 uColor;
 out vec4 o;
 void main(){
-  float c = texelFetch(uMask, ivec2(gl_FragCoord.xy) - uOrigin, 0).r;
+  ivec2 q = ivec2(gl_FragCoord.xy) - uOrigin;
+  ivec2 sz = textureSize(uMask, 0);
+  if (q.x < 0 || q.y < 0 || q.x >= sz.x || q.y >= sz.y) { o = vec4(0.0); return; }
+  float c = texelFetch(uMask, q, 0).r;
   o = vec4(uColor * c, c);
 }`
 
@@ -53,7 +58,12 @@ export interface FillOptions {
   antialias: boolean
   /** override: true = recolour only existing pixels (source-atop); default = layer.alphaLock */
   recolor?: boolean
+  /** fill the whole work area (Fill layer): the seed is the middle of it, no "limited" notice */
+  whole?: boolean
 }
+
+/** Largest flood-fill area (px per side) on an infinite canvas: the work rect around the seed is cut down to this. */
+const FILL_CAP = 4096
 
 export const referenceLayer = (doc: Document): Layer | null => doc.layers.find((l) => (l as any).reference && !(l as any).isGroup) ?? null
 
@@ -70,8 +80,12 @@ export class FillSession {
   private gpu: GPU
   private levels: Uint8Array
   private src: FillSource
-  private backup: Surface
-  private edit: PixelEdit
+  private backup: Surface | null = null
+  private edit: PixelEdit | null = null
+  /** infinite canvas: the work area the levels were computed on, and the live tile edit */
+  private area: Rect | null = null
+  private live: LiveTileEdit | null = null
+  private limitedWarned = false
   private drawn: Rect | null = null
   private mask: FillMask | null = null
   private tex: WebGLTexture | null = null
@@ -86,13 +100,20 @@ export class FillSession {
     readonly sx: number,
     readonly sy: number,
     private rgb: [number, number, number],
-    private opts: FillOptions
+    private opts: FillOptions,
+    area: Rect | null = null
   ) {
     const doc = app.doc
     this.gpu = doc.gpu
     this.layer = layer
     this.src = src
     this.levels = computeFillLevels(src, sx, sy)
+    if (area) {
+      this.area = area
+      this.selection = activeSelectionMask(doc, area)
+      this.live = new LiveTileEdit(doc, layer, 'ColorDrop')
+      return
+    }
     this.selection = activeSelectionMask(doc)
     const full = { x: 0, y: 0, w: doc.width, h: doc.height }
     this.backup = doc.gpu.surface(doc.width, doc.height, layer.surface.fmt, 0)
@@ -103,7 +124,14 @@ export class FillSession {
   /** Returns null (with a toast) when the fill cannot start. */
   static begin(app: App, docX: number, docY: number, rgb: [number, number, number], opts: FillOptions): FillSession | null {
     const doc = app.doc
-    const layer = doc.activeLayer
+    let layer = doc.activeLayer
+    if (layer?.langSet) {
+      try {
+        layer = doc.writableActive()
+      } catch {
+        /* layer limit: falls through to the group check */
+      }
+    }
     if (!layer || (layer as any).isGroup) {
       app.notify(t('color.fill.selectLayer'))
       return null
@@ -112,6 +140,7 @@ export class FillSession {
       app.notify(t('color.fill.locked'))
       return null
     }
+    if (doc.isInfinite) return FillSession.beginInf(app, layer, docX, docY, rgb, opts)
     const x = Math.floor(docX)
     const y = Math.floor(docY)
     if (x < 0 || y < 0 || x >= doc.width || y >= doc.height) return null
@@ -122,6 +151,31 @@ export class FillSession {
     return new FillSession(app, layer, { data, w: doc.width, h: doc.height }, x, y, rgb, opts)
   }
 
+  /** Infinite canvas: flood fill bounded by the work rect (frame, else visible area), at most FILL_CAP px per side around the seed. */
+  private static beginInf(app: App, layer: Layer, docX: number, docY: number, rgb: [number, number, number], opts: FillOptions): FillSession | null {
+    const doc = app.doc
+    const wr = workRect(app)
+    let x = Math.floor(docX)
+    let y = Math.floor(docY)
+    if (opts.whole) {
+      x = Math.floor(wr.x + wr.w / 2)
+      y = Math.floor(wr.y + wr.h / 2)
+    }
+    if (x < wr.x || y < wr.y || x >= wr.x + wr.w || y >= wr.y + wr.h) {
+      app.notify(t('color.fill.outside'))
+      return null
+    }
+    const half = FILL_CAP / 2
+    const x0 = Math.max(wr.x, x - half)
+    const y0 = Math.max(wr.y, y - half)
+    const area: Rect = { x: x0, y: y0, w: Math.min(wr.x + wr.w, x + half) - x0, h: Math.min(wr.y + wr.h, y + half) - y0 }
+    if (opts.whole && (area.w < wr.w || area.h < wr.h)) app.notify(t('color.fill.limited'))
+    const ref = referenceLayer(doc)
+    const from = ref ?? layer
+    const data = doc.readRegionPixels(from, area)
+    return new FillSession(app, layer, { data, w: area.w, h: area.h }, x - area.x, y - area.y, rgb, opts, area)
+  }
+
   /** (Re)render the fill at `threshold` (0..1). Returns false when nothing is covered. */
   render(threshold: number): boolean {
     if (this.done) return false
@@ -130,15 +184,17 @@ export class FillSession {
     const gpu = this.gpu
     const gl = gpu.gl
     if (this.drawn) {
-      gpu.blit(this.backup, this.drawn, this.layer.surface, this.drawn.x, this.drawn.y)
+      if (this.live) this.live.restore(this.drawn)
+      else gpu.blit(this.backup!, this.drawn, this.layer.surface, this.drawn.x, this.drawn.y)
       doc.events.emit('change', { rect: this.drawn })
       this.drawn = null
     }
     this.mask = maskFromLevels(this.levels, this.src, this.sx, this.sy, this.threshold, { antialias: this.opts.antialias, selection: this.selection })
     const m = this.mask
     if (!m) return false
+    if (this.live && this.area) return this.renderInf(m)
     const rect: Rect = { x: m.x, y: m.y, w: m.w, h: m.h }
-    this.edit.save(rect)
+    this.edit!.save(rect)
     if (this.tex) gl.deleteTexture(this.tex)
     const tex = (this.tex = gl.createTexture()!)
     gl.bindTexture(gl.TEXTURE_2D, tex)
@@ -164,9 +220,48 @@ export class FillSession {
     return true
   }
 
+  private renderInf(m: FillMask): boolean {
+    const doc = this.app.doc
+    const gpu = this.gpu
+    const gl = gpu.gl
+    const a = this.area!
+    const rect: Rect = { x: a.x + m.x, y: a.y + m.y, w: m.w, h: m.h }
+    const spans = this.live!.prepare(rect) // snapshots + allocation before any texture is bound
+    if (this.tex) gl.deleteTexture(this.tex)
+    const tex = (this.tex = gl.createTexture()!)
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, m.w, m.h)
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, m.w, m.h, gl.RED, gl.UNSIGNED_BYTE, m.cov)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    const p = gpu.program('colordrop-mask', FS_VERT, MASK_FS).use()
+    p.i('uMask', 0)
+    p.v3('uColor', this.rgb[0], this.rgb[1], this.rgb[2])
+    gl.enable(gl.BLEND)
+    const atop = this.opts.recolor ?? this.layer.alphaLock
+    if (atop) gl.blendFunc(gl.DST_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    else gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+    for (const s of spans) {
+      gpu.bindTex(0, tex)
+      gl.uniform2i(p.loc('uOrigin'), rect.x - s.ox, rect.y - s.oy)
+      gpu.bindTarget(s.surf, null)
+      gpu.fullscreen()
+    }
+    gl.disable(gl.BLEND)
+    gl.disable(gl.SCISSOR_TEST)
+    this.drawn = rect
+    // the fill reached the border of the work area: it was limited by it
+    if (!this.opts.whole && !this.limitedWarned && (m.x === 0 || m.y === 0 || m.x + m.w >= a.w || m.y + m.h >= a.h)) {
+      this.limitedWarned = true
+      this.app.notify(t('color.fill.limited'))
+    }
+    doc.events.emit('change', { rect })
+    return true
+  }
+
   private release(): void {
     this.done = true
-    this.backup.dispose()
+    this.backup?.dispose()
     if (this.tex) this.gpu.gl.deleteTexture(this.tex)
     this.tex = null
   }
@@ -177,8 +272,11 @@ export class FillSession {
     const doc = this.app.doc
     const ok = !!this.drawn
     let dirty: Rect | null = null
-    if (ok) dirty = this.edit.finish()
-    else this.edit.abort()
+    if (this.live) {
+      if (ok) dirty = this.live.commit()
+      else this.live.cancel()
+    } else if (ok) dirty = this.edit!.finish()
+    else this.edit!.abort()
     this.release()
     if (dirty) {
       doc.emitCommit('filter', this.layer.id, dirty, 'ColorDrop')
@@ -189,11 +287,16 @@ export class FillSession {
 
   cancel(): void {
     if (this.done) return
-    if (this.drawn) {
-      this.gpu.blit(this.backup, this.drawn, this.layer.surface, this.drawn.x, this.drawn.y)
-      this.app.doc.events.emit('change', { rect: this.drawn })
+    if (this.live) {
+      this.live.cancel()
+      if (this.drawn) this.app.doc.events.emit('change', { rect: this.drawn })
+    } else {
+      if (this.drawn) {
+        this.gpu.blit(this.backup!, this.drawn, this.layer.surface, this.drawn.x, this.drawn.y)
+        this.app.doc.events.emit('change', { rect: this.drawn })
+      }
+      this.edit!.abort()
     }
-    this.edit.abort()
     this.release()
   }
 }
@@ -225,7 +328,7 @@ export function fillLast(app: App): boolean {
 /** Fill the entire active layer (or the active selection) with the primary colour. Alpha-locked layers are recoloured. */
 export function fillLayer(app: App, recolorOnly = false): boolean {
   const doc = app.doc
-  const s = FillSession.begin(app, 0, 0, currentRgb(app), { threshold: 1, antialias: false, recolor: recolorOnly ? true : undefined })
+  const s = FillSession.begin(app, 0, 0, currentRgb(app), { threshold: 1, antialias: false, recolor: recolorOnly ? true : undefined, whole: true })
   if (!s) return false
   if (!s.render(1)) {
     s.cancel()

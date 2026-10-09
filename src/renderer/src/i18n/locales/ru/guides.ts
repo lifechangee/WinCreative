@@ -28,6 +28,8 @@ const dict: Record<string, string> = {
   'guides.panel.segments': 'Сегменты',
   'guides.panel.rotationalSymmetryNoMirroring': 'Вращательная симметрия (без отражения)',
   'guides.panel.dragTheCentreAnd': 'Перетаскивайте центр и маркер поворота на холсте.',
+  'guides.panel.gridOriginHere': 'Начало сетки здесь',
+  'guides.panel.gridOriginTip': 'Перенести начало сетки в центр рамки (или в центр вида, если рамки нет)',
   'guides.panel.resetAxis': 'Сбросить ось',
   'guides.panel.drawingAssist': 'Помощник рисования',
   'guides.panel.assistedDrawingActiveLayer': 'Рисование с помощью (активный слой)',

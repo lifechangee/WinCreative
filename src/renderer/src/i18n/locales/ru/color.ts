@@ -105,5 +105,8 @@ const dict: Record<string, string> = {
   'color.settings.antialias': 'Сглаженные края заливки',
   'color.palette.builtin.default': 'Стандартная',
   'color.palette.fallbackName': 'Палитра',
+
+  'color.fill.outside': 'Нажмите внутри рамки / видимой области для заливки',
+  'color.fill.limited': 'Заливка ограничена рамкой/видимой областью',
 }
 export default dict

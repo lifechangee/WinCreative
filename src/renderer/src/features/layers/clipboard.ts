@@ -35,14 +35,25 @@ const same = (a: Uint8Array | null, b: Uint8Array | null): boolean => {
 /** true when the app has copied pixels internally */
 export const hasInternalClip = (): boolean => clip !== null
 
+/** PNG (with alpha) to the OS clipboard: main-process clipboard first (no focus / permission needed), async Clipboard API as the fallback. */
+export async function writeClipboardPng(png: Uint8Array): Promise<void> {
+  if (window.brushworkClip) {
+    try {
+      await window.brushworkClip.writeImage(png)
+      return
+    } catch (e) {
+      console.warn('[clipboard] main write failed', e)
+    }
+  }
+  await navigator.clipboard.write([new ClipboardItem({ 'image/png': new Blob([png as BlobPart], { type: 'image/png' }) })])
+}
+
 async function store(img: PixelImage): Promise<void> {
   clip = { img, osPng: null }
   try {
     const png = await encodePng(img.data, img.w, img.h)
-    if (window.brushworkClip) {
-      await window.brushworkClip.writeImage(png)
-      clip.osPng = await window.brushworkClip.readImage()
-    }
+    await writeClipboardPng(png)
+    clip.osPng = (await window.brushworkClip?.readImage()) ?? null
   } catch (e) {
     console.warn('[layers] OS clipboard write failed', e)
   }
@@ -93,6 +104,27 @@ export async function cut(app: App): Promise<boolean> {
 /** Copy the composite of all visible layers (inside the selection when there is one). */
 export async function copyAll(app: App): Promise<boolean> {
   const doc = app.doc
+  if (doc.isInfinite) {
+    const sb = clipMask.tex ? app.selection.bounds() : null
+    const b = sb ?? doc.contentBounds({ tight: true, visibleOnly: true })
+    if (!b) {
+      app.notify(t('layers.toast.nothingToCopy'))
+      return false
+    }
+    const max = Math.min(8192, app.gpu.maxTexture)
+    const r = { x: b.x, y: b.y, w: Math.min(b.w, max), h: Math.min(b.h, max) }
+    const flat = app.compositor.readFlattened(r, 1, false)
+    const cov = sb ? app.selection.readRect(r) : null
+    if (cov) for (let i = 0; i < cov.length; i++) flat.px[i * 4 + 3] = (flat.px[i * 4 + 3] * cov[i]) / 255
+    const c = cropToAlpha(flat.px, flat.w, flat.h)
+    if (!c) {
+      app.notify(t('layers.toast.nothingToCopy'))
+      return false
+    }
+    await store({ ...c, x: c.x + r.x, y: c.y + r.y })
+    app.notify(t('layers.toast.canvasCopied'))
+    return true
+  }
   const px = app.compositor.readFlattened(false)
   const sel = (app as any).selection as { data: Uint8Array | null } | undefined
   if (clipMask.tex && sel?.data) for (let i = 0, n = doc.width * doc.height; i < n; i++) px[i * 4 + 3] = (px[i * 4 + 3] * sel.data[i]) / 255
@@ -132,7 +164,7 @@ export function cutAndPaste(app: App): void {
 /** Scale an ImageData-like bitmap to fit inside the canvas (never upscales). */
 async function fitToCanvas(app: App, w: number, h: number, data: Uint8ClampedArray | Uint8Array): Promise<PixelImage> {
   const doc = app.doc
-  const k = Math.min(1, doc.width / w, doc.height / h)
+  const k = doc.isInfinite ? 1 : Math.min(1, doc.width / w, doc.height / h)
   let outW = w
   let outH = h
   let out = new Uint8ClampedArray(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer)
@@ -152,7 +184,12 @@ async function fitToCanvas(app: App, w: number, h: number, data: Uint8ClampedArr
 
 export async function pasteImageData(app: App, name: string, w: number, h: number, data: Uint8ClampedArray | Uint8Array): Promise<void> {
   const img = await fitToCanvas(app, w, h, data)
-  guard(app, () => insertAndTransform(app.doc, layerFromImage(app.doc, img, name), 'Paste'))
+  guard(app, () => pasted(app, insertAndTransform(app.doc, layerFromImage(app.doc, img, name), 'Paste')))
+}
+
+/** A paste next to a language layer that already has writing in the shown language is an ordinary layer: say so (it shows in every language). */
+const pasted = (app: App, r: ReturnType<typeof insertAndTransform>): void => {
+  if (r === 'common-over-language') app.notify(t('langs.toast.pastedCommon'))
 }
 
 /** Paste as a new layer: OS clipboard bitmap when it is foreign, else our internal clip. */
@@ -170,7 +207,7 @@ export async function paste(app: App): Promise<boolean> {
   }
   if (clip) {
     const img = clip.img
-    guard(app, () => insertAndTransform(app.doc, layerFromImage(app.doc, img, t('core.doc.pastedLayer')), 'Paste'))
+    guard(app, () => pasted(app, insertAndTransform(app.doc, layerFromImage(app.doc, img, t('core.doc.pastedLayer')), 'Paste')))
     return true
   }
   app.notify(t('layers.toast.clipboardEmpty'))
@@ -211,8 +248,8 @@ export async function insertFile(app: App, photosOnly = false): Promise<boolean>
 function insertPsd(app: App, bytes: Uint8Array): void {
   const doc = app.doc
   const psd = decodePsd(bytes)
-  const ox = Math.round((doc.width - psd.width) / 2)
-  const oy = Math.round((doc.height - psd.height) / 2)
+  const ox = doc.isInfinite ? Math.round(app.view.cx - psd.width / 2) : Math.round((doc.width - psd.width) / 2)
+  const oy = doc.isInfinite ? Math.round(app.view.cy - psd.height / 2) : Math.round((doc.height - psd.height) / 2)
   const made: Layer[] = []
   const build = (list: ReturnType<typeof decodePsd>['layers'], parent: Layer | null): void => {
     let last: Layer | null = null

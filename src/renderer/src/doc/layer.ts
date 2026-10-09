@@ -1,6 +1,7 @@
 import { t } from '../i18n'
 import type { BlendMode } from '../core/blend'
 import type { Surface } from '../gl/gpu'
+import type { TileStore } from './tileStore'
 
 /** Scalar layer properties: everything here is undoable via doc.setLayerProps and saved in .bwk. */
 export interface LayerProps {
@@ -29,6 +30,10 @@ export interface LayerProps {
   maskEnabled: boolean
   /** show the mask itself instead of the layer while true */
   maskView: boolean
+  /** language layer: a group whose children are the per-language cells (see features/langvariants, docs/LANGUAGE_VARIANTS.md) */
+  langSet: boolean
+  /** language cell: language code ('' = common layer); only paint layers whose parent is a langSet group carry one */
+  lang: string
 }
 
 export const DEFAULT_LAYER_PROPS: LayerProps = {
@@ -46,7 +51,9 @@ export const DEFAULT_LAYER_PROPS: LayerProps = {
   reference: false,
   drawingAssist: false,
   maskEnabled: true,
-  maskView: false
+  maskView: false,
+  langSet: false,
+  lang: ''
 }
 
 const PROP_KEYS = Object.keys(DEFAULT_LAYER_PROPS) as (keyof LayerProps)[]
@@ -67,10 +74,29 @@ export class Layer implements LayerProps {
   drawingAssist!: boolean
   maskEnabled!: boolean
   maskView!: boolean
+  langSet!: boolean
+  lang!: string
   /** Optional layer mask: RGBA surface, mask value = luminance of the (premultiplied) colour. White shows. */
   mask: Surface | null = null
   /** true while brush/filters should act on the mask instead of the pixels (Procreate: mask thumbnail selected) */
   editingMask = false
+  /**
+   * Infinite canvas: the layer's pixels as a sparse tile map (then `pixels` is only a 1x1 placeholder, like for groups).
+   * null on fixed documents and groups.
+   */
+  tiles: TileStore | null = null
+  /** Infinite canvas: the sparse tile store of the layer mask (the placeholder `mask` surface owns it), else null */
+  get maskTiles(): TileStore | null {
+    return this.mask?.inf ?? null
+  }
+  /** value of the mask where it has no tile (1 = visible) */
+  get maskFill(): 0 | 1 {
+    return ((this.mask?.inf as { fill?: 0 | 1 } | undefined)?.fill ?? 1) as 0 | 1
+  }
+  /** The tile store brush/filters/transforms act on: the mask's while editing it, else the pixels' (null on fixed documents) */
+  get editTiles(): TileStore | null {
+    return this.editingMask && this.mask ? this.maskTiles : this.tiles
+  }
 
   constructor(
     public id: string,
@@ -104,8 +130,14 @@ export class Layer implements LayerProps {
     return o as LayerProps
   }
 
+  /** GPU bytes owned by this layer's pixels (tile map or surface) */
+  get pixelBytes(): number {
+    return this.tiles ? this.tiles.bytes : this.pixels.bytes
+  }
+
   dispose(): void {
     this.pixels.dispose()
     this.mask?.dispose()
+    this.tiles?.dispose()
   }
 }

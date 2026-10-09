@@ -279,6 +279,7 @@ const dict: Record<string, string> = {
   'core.blend.subtract': 'Subtract',
   'core.blend.divide': 'Divide',
   'core.history.feather_selection': 'Feather selection',
+  'core.toast.tileCorrupt': 'A part of the canvas could not be restored from memory and was left empty. Use Undo, or reopen the last saved version of the artwork, if something is missing.',
   'core.toast.viewFlipped': 'Canvas view flipped',
   'core.toast.viewRestored': 'Canvas view restored',
   'core.hover.opacity': 'Opacity {n}%',
@@ -293,5 +294,9 @@ const dict: Record<string, string> = {
   'core.history.select_rectangle': 'Select rectangle',
   'core.history.select_ellipse': 'Select ellipse',
   'core.history.select_freehand': 'Select freehand',
+  'core.history.smart_selection': 'Smart selection',
+  'core.history.cut_object_to_new_layer': 'Cut object to new layer',
+  'core.history.copy_object_to_new_layer': 'Copy object to new layer',
+  'core.history.remove_background': 'Remove background',
 }
 export default dict

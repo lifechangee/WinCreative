@@ -182,6 +182,15 @@ const dict: Record<string, string> = {
   'animio.info.pixelFormat': 'Формат пикселей',
   'animio.info.format16': '16 бит с плавающей запятой на канал',
   'animio.info.format8': '8 бит на канал',
+  'animio.info.kind': 'Тип холста',
+  'animio.info.kindInfinite': 'Бесконечный (без границ)',
+  'animio.info.tiles': 'Плитки пикселей',
+  'animio.info.tilesValue': '{n} плиток · {mb} МБ видеопамяти',
+  'animio.info.tiers': 'Уровни памяти',
+  'animio.info.tiersValue': 'GPU {gpu} · сжато {cpu} ({cmb} МБ) · на диске {disk} ({dmb} МБ)',
+  'animio.info.content': 'Нарисованная область',
+  'animio.info.contentValue': '{w} × {h} px, от ({x}, {y})',
+  'animio.info.contentNone': 'Пока ничего не нарисовано',
   'animio.info.stats': 'Статистика',
   'animio.info.strokes': 'Мазки',
   'animio.info.timeSpent': 'Затраченное время',
@@ -332,5 +341,7 @@ const dict: Record<string, string> = {
   'animio.tle.cheat.delete': 'Удалить выбранную паузу или участок',
   'animio.tle.cheat.undo': 'Отменить / повторить правку',
   'animio.tle.cheat.back': 'Назад к рисунку',
+  'animio.share.psd.tooBig': 'Формат Photoshop PSD поддерживает не более {max} px по стороне; этот холст — {w} × {h} px. Экспортируйте плоский PNG.',
+  'animio.share.image.encoding': 'Кодирование изображения… {pct}%',
 }
 export default dict

@@ -4,7 +4,8 @@ import type { Document } from '../../doc/document'
 import type { Sample } from '../../core/types'
 import { strokeHooks } from '../../tools/strokeHooks'
 import type { StrokeAdapter, StrokeChannel } from '../../tools/strokeHooks'
-import { GuideState, Pt, applyXform, pickLine, projectOnLine, assistCandidates, defaultGuide, familyDirs, normalizeGuide, symmetryAxes, symmetryTransforms } from './model'
+import { viewportRect, workRect } from '../frame/workRect'
+import { GuideState, Pt, applyXform, infiniteAnchor, pickLine, projectOnLine, assistCandidates, defaultGuide, familyDirs, normalizeGuide, symmetryAxes, symmetryTransforms } from './model'
 import type { DragHandler, Overlay } from './overlay'
 
 export interface GuideEvents {
@@ -52,9 +53,25 @@ export class GuideManager {
     this.states.set(doc, normalizeGuide(raw, doc.width, doc.height))
     if (doc === this.app.doc) this.events.emit('change', undefined)
   }
+  /** Rectangle a new guide is centred in on an infinite canvas: the frame, else the visible area. */
+  anchorBox(): { x: number; y: number; w: number; h: number } {
+    return workRect(this.app)
+  }
+  /** Infinite canvas: put the symmetry centre / vanishing points / grid origin at the anchor (frame or view centre). */
+  placeAtAnchor(): void {
+    const g = this.state
+    const a = infiniteAnchor(this.anchorBox())
+    const box = this.anchorBox()
+    g.symCenter = a.centre
+    g.gridOrigin = a.centre
+    g.vps = [a.vp, { x: a.vp.x - box.w * 0.4, y: a.vp.y }, { x: a.vp.x, y: Math.round(box.y + box.h * 1.6) }].slice(0, Math.max(1, g.vps.length))
+    g.placed = true
+  }
   /** Patch the guide; notifies listeners. */
   set(patch: Partial<GuideState>): void {
-    Object.assign(this.state, patch)
+    const g = this.state
+    Object.assign(g, patch)
+    if (this.app.doc.isInfinite && !g.placed && g.enabled) this.placeAtAnchor()
     this.events.emit('change', undefined)
   }
   setEditing(on: boolean): void {
@@ -73,17 +90,20 @@ export class GuideManager {
   /** vanishing-point count for perspective: 1, 2 or 3 */
   setVpCount(n: 1 | 2 | 3): void {
     const g = this.state
-    const w = this.app.doc.width
-    const h = this.app.doc.height
+    const box = this.app.doc.isInfinite ? this.anchorBox() : { x: 0, y: 0, w: this.app.doc.width, h: this.app.doc.height }
+    const w = box.w
+    const h = box.h
+    const ox = box.x
+    const oy = box.y
     const defaults: Pt[] = [
-      { x: w * 0.5, y: h * 0.4 },
-      { x: w * 0.1, y: h * 0.4 },
-      { x: w * 0.5, y: h * 1.6 }
+      { x: ox + w * 0.5, y: oy + h * 0.4 },
+      { x: ox + w * 0.1, y: oy + h * 0.4 },
+      { x: ox + w * 0.5, y: oy + h * 1.6 }
     ]
     if (n === 1) g.vps = [g.vps[0] ?? defaults[0]]
-    else if (n === 2) g.vps = [g.vps[0] ?? { x: w * 0.9, y: h * 0.4 }, g.vps[1] ?? { x: w * 0.1 - 0, y: (g.vps[0] ?? defaults[0]).y }]
+    else if (n === 2) g.vps = [g.vps[0] ?? { x: ox + w * 0.9, y: oy + h * 0.4 }, g.vps[1] ?? { x: ox + w * 0.1 - 0, y: (g.vps[0] ?? defaults[0]).y }]
     else g.vps = [g.vps[0] ?? defaults[0], g.vps[1] ?? defaults[1], g.vps[2] ?? defaults[2]]
-    if (n === 2 && g.vps.length === 2 && g.vps[1].x === g.vps[0].x) g.vps[1] = { x: w * 0.1, y: g.vps[0].y }
+    if (n === 2 && g.vps.length === 2 && g.vps[1].x === g.vps[0].x) g.vps[1] = { x: ox + w * 0.1, y: g.vps[0].y }
     this.selVp = Math.min(this.selVp, g.vps.length - 1)
     this.events.emit('change', undefined)
   }
@@ -153,6 +173,8 @@ export class GuideManager {
   private family(c: CanvasRenderingContext2D, dir: Pt, size: number): void {
     const corners = this.visibleDoc()
     const n = { x: -dir.y, y: dir.x }
+    const org = this.state.gridOrigin
+    const o0 = org.x * n.x + org.y * n.y
     let n0 = Infinity
     let n1 = -Infinity
     let d0 = Infinity
@@ -168,11 +190,11 @@ export class GuideManager {
     let step = size
     const zoom = this.app.view.zoom
     while (step * zoom < 5) step *= 2 // never draw an unreadable mesh
-    const k0 = Math.floor(n0 / step)
-    const k1 = Math.ceil(n1 / step)
+    const k0 = Math.floor((n0 - o0) / step)
+    const k1 = Math.ceil((n1 - o0) / step)
     if (k1 - k0 > 1500) return
     for (let k = k0; k <= k1; k++) {
-      const o = k * step
+      const o = k * step + o0
       this.line(c, { x: n.x * o + dir.x * d0, y: n.y * o + dir.y * d0 }, { x: n.x * o + dir.x * d1, y: n.y * o + dir.y * d1 })
     }
   }
@@ -365,11 +387,14 @@ export class GuideManager {
           move: (x, y) => {
             const d = ov.toDoc(x, y)
             g.symCenter = { x: d.x + off.x, y: d.y + off.y }
-            const W = this.app.doc.width
-            const H = this.app.doc.height
-            // magnet to the canvas centre lines
-            if (Math.abs(g.symCenter.x - W / 2) < 6 / this.app.view.zoom) g.symCenter.x = W / 2
-            if (Math.abs(g.symCenter.y - H / 2) < 6 / this.app.view.zoom) g.symCenter.y = H / 2
+            // magnet to the canvas centre lines (infinite canvas: the frame / doc origin lines)
+            const inf = this.app.doc.isInfinite
+            const box = inf ? this.anchorBox() : { x: 0, y: 0, w: this.app.doc.width, h: this.app.doc.height }
+            const W = box.x + box.w / 2
+            const H = box.y + box.h / 2
+            if (Math.abs(g.symCenter.x - W) < 6 / this.app.view.zoom) g.symCenter.x = W
+            if (Math.abs(g.symCenter.y - H) < 6 / this.app.view.zoom) g.symCenter.y = H
+            g.placed = true
             this.events.emit('change', undefined)
           }
         }

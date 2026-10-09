@@ -365,6 +365,8 @@ const diagTab: Builder = (pane, app) => {
   return () => d.dispose()
 }
 
+import { tileMemory } from '../../doc/tileMemory'
+
 const advancedTab: Builder = (pane, app, rerender) => {
   pane.append(h('h4', { text: tk('interface.prefs.brush_cache') }))
   pane.append(row(tk('interface.prefs.brush_preview_cache'), tk('interface.prefs.rendered_stroke_previews_used_in_the_b'), h('button', { class: 'btn', text: tk('interface.prefs.clear_cache'), onclick: () => { clearThumbnails(); app.notify(t('interface.prefs.cache_cleared')) } })))
@@ -374,6 +376,31 @@ const advancedTab: Builder = (pane, app, rerender) => {
   const gpuName = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER))
   pane.append(row(tk('interface.prefs.graphics_device'), null, h('span', { class: 'kbd', text: gpuName })))
   pane.append(row(tk('interface.prefs.max_texture_size'), null, h('span', { class: 'kbd', text: t('interface.prefs.fmt.px', { n: String(gl.getParameter(gl.MAX_TEXTURE_SIZE)) }) })))
+  // infinite canvas tile memory: budgets are derived from the device; 0 = automatic
+  pane.append(h('h4', { text: tk('ui.inf.mem.title') }))
+  const memOv = (): { gpuMB: number; cpuMB: number } => {
+    try {
+      return { gpuMB: 0, cpuMB: 0, ...(JSON.parse(localStorage.getItem('bw.tileMem') ?? '{}') as object) }
+    } catch {
+      return { gpuMB: 0, cpuMB: 0 }
+    }
+  }
+  const memInput = (key: 'gpuMB' | 'cpuMB'): HTMLElement => {
+    const i = h('input', { type: 'number', min: '0', max: '65536', step: '64', value: String(memOv()[key]), style: 'width:90px' }) as HTMLInputElement
+    i.addEventListener('change', () => {
+      const o = memOv()
+      o[key] = Math.max(0, Math.round(Number(i.value) || 0))
+      try {
+        localStorage.setItem('bw.tileMem', JSON.stringify(o))
+      } catch {
+        /* storage unavailable */
+      }
+      tileMemory.configure(app.gpu)
+    })
+    return i
+  }
+  pane.append(row(tk('ui.inf.mem.gpu'), tk('ui.inf.mem.note'), memInput('gpuMB')))
+  pane.append(row(tk('ui.inf.mem.cpu'), null, memInput('cpuMB')))
   pane.append(h('h4', { text: tk('interface.prefs.project_canvas') }))
   pane.append(row(tk('interface.prefs.second_window'), tk('interface.prefs.shows_the_artwork_without_the_interfac'), h('button', { class: 'btn', text: isProjecting() ? t('interface.prefs.stopProjecting') : t('interface.prefs.projectCanvas'), onclick: () => { toggleProjector(app); rerender() } })))
   pane.append(h('h4', { text: tk('interface.prefs.reset') }))

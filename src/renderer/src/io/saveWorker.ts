@@ -16,6 +16,7 @@ type In =
   | { t: 'store'; doc: string; key: string; png: ArrayBuffer }
   | { t: 'zip'; id: number; doc: string; entries: { name: string; keys: string[] }[]; files: Record<string, Uint8Array>; keep: string[] }
   | { t: 'drop'; doc: string }
+  | { t: 'cat'; id: number; doc: string; keys: string[] }
 
 const scope = self as unknown as { onmessage: ((e: MessageEvent<In>) => void) | null; postMessage(m: unknown, t?: Transferable[]): void }
 
@@ -62,6 +63,15 @@ scope.onmessage = (e): void => {
       case 'drop':
         store.delete(m.doc)
         break
+      case 'cat': {
+        const mp = docMap(m.doc)
+        const parts = m.keys.map((k) => mp.get(k) ?? new Uint8Array(0))
+        const b = new Uint8Array(parts.reduce((a, p) => a + p.length, 0))
+        let o = 0
+        for (const p of parts) (b.set(p, o), (o += p.length))
+        scope.postMessage({ t: 'zip', id: m.id, zip: b.buffer }, [b.buffer as ArrayBuffer])
+        break
+      }
       case 'zip': {
         const mp = docMap(m.doc)
         const files: Record<string, [Uint8Array, { level: 0 }]> = {}

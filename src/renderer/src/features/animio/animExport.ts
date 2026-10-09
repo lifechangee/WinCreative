@@ -149,7 +149,7 @@ export async function openAnimExport(app: App, ui: UIContext, anim: AnimAssist):
   })
   const info = h('p', { class: 'an-note' })
   const upd = (): void => {
-    const sz = sizeFor(app.doc.width, app.doc.height, st)
+    const sz = sizeFor(anim.renderer().width, anim.renderer().height, st)
     const ticks = playbackSequence(anim.frames().map((f) => anim.holdOf(f)), st.mode).reduce((a, s) => a + s.ticks, 0)
     info.textContent = t('animio.anim.export.info', { frames: anim.frames().length, ticks, fps: st.fps, secs: fx(ticks / st.fps, 2), w: sz.width, h: sz.height })
   }
@@ -192,7 +192,7 @@ export async function openAnimExport(app: App, ui: UIContext, anim: AnimAssist):
     go.disabled = true
     setStatus(() => t('animio.anim.export.encoding'))
     try {
-      const size = sizeFor(app.doc.width, app.doc.height, st)
+      const size = sizeFor(anim.renderer().width, anim.renderer().height, st)
       anim.stop()
       const res = await exportFrames(animFrameSource(anim, st, size), st, out, size, (f) => prog.set(f), app.doc.name)
       setStatus(() => (res.ok ? t('animio.anim.export.saved', { size: fmtBytes(res.size) }) : t('animio.common.exportFailed', { error: String(res.error) })))

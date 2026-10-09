@@ -4,10 +4,14 @@ import type { Rect } from '../../core/types'
 import { t } from '../../i18n'
 import type { Layer } from '../../doc/layer'
 import type { Surface } from '../../gl/gpu'
+import { tilesIn } from '../../core/tiles'
+import { LiveTileEdit, type TileSpan } from '../../doc/tileEdit'
+import { workRect } from '../frame/workRect'
+import { chunkPlan, extractChunk, removeSourceInf, type SrcChunk } from './xformInf'
 import type { Pt } from './geom'
 import { extractFloat, Interp, MeshRenderer, readRedChannel, removeSelected } from './gpuOps'
 import { groupHistory } from './history'
-import type { SelSnapshot } from './selection'
+import { MAX_SEL_WINDOW, type SelSnapshot } from './selection'
 import {
   HandleId,
   Net,
@@ -99,10 +103,13 @@ export interface SnapLine {
 }
 
 const PAD = 2
+/** halo (px) around the chunks of a source that is split to respect the GPU texture limit */
+const HALO = 8
 const DEG15 = Math.PI / 12
 
 /** Bounding box of non-transparent pixels of a layer (null when empty). */
 export function layerContentBounds(app: App, layer: Layer): Rect | null {
+  if (app.doc.isInfinite) return layer.tiles ? layer.tiles.tightBounds() : null
   const { width: w, height: h } = app.doc
   const px = app.gpu.readRGBA8(layer.surface, { x: 0, y: 0, w, h })
   let x0 = w
@@ -139,6 +146,12 @@ export class TransformSession {
   onChange: (() => void) | null = null
 
   private entries: Entry[] = []
+  /** infinite canvas: live tile edits per layer + the source split into GPU-sized chunks */
+  private ie: { layer: Layer; live: LiveTileEdit }[] = []
+  private chunks: SrcChunk[] = []
+  private inf = false
+  private warnedBig = false
+  private curLayer = 0
   private maskFloat: Surface | null = null
   private srcRect: Rect
   private box: { w: number; h: number }
@@ -163,6 +176,14 @@ export class TransformSession {
     this.hadSel = app.selection.hasSelection()
     this.selBefore = app.selection.snapshot()
     this.mesh = new MeshRenderer(gpu)
+    if (doc.isInfinite) {
+      this.inf = true
+      this.net0 = makeNet(rect, 1, 1)
+      this.net = cloneNet(this.net0)
+      this.pivot = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 }
+      this.initInf(layers, rect)
+      return
+    }
     const full = { x: 0, y: 0, w: doc.width, h: doc.height }
     for (const layer of layers) {
       const orig = gpu.surface(doc.width, doc.height, layer.surface.fmt, 0)
@@ -202,7 +223,7 @@ export class TransformSession {
   }
 
   get layerCount(): number {
-    return this.entries.length
+    return this.inf ? this.ie.length : this.entries.length
   }
   get selectionBased(): boolean {
     return this.hadSel
@@ -239,6 +260,15 @@ export class TransformSession {
   private dstRect(): Rect | null {
     const b = netBounds(this.net)
     if (![b.x, b.y, b.w, b.h].every(Number.isFinite)) return null
+    if (this.inf) {
+      const r = { x: Math.floor(b.x - 3), y: Math.floor(b.y - 3), w: Math.ceil(b.w + 6) + 1, h: Math.ceil(b.h + 6) + 1 }
+      if (tilesIn(r).length > 2500) {
+        if (!this.warnedBig) this.app.notify(t('selectxform.xform.tooBig'))
+        this.warnedBig = true
+        return null
+      }
+      return r
+    }
     return clampToCanvas({ x: b.x - 3, y: b.y - 3, w: b.w + 6, h: b.h + 6 }, this.app.doc.width, this.app.doc.height)
   }
 
@@ -253,6 +283,7 @@ export class TransformSession {
   /** Re-render the live preview into the layer(s). */
   render(): void {
     if (this.done) return
+    if (this.inf) return this.renderInf()
     const dst = this.dstRect()
     const src = clampToCanvas(this.srcRect, this.app.doc.width, this.app.doc.height)
     let R = unionRect(unionRect(src, dst), this.touched)
@@ -319,12 +350,13 @@ export class TransformSession {
   /** Scale to fit the canvas and centre. */
   fitToScreen(): void {
     const b = netBounds(this.net)
-    const W = this.app.doc.width
-    const H = this.app.doc.height
+    const wr = this.inf ? workRect(this.app) : { x: 0, y: 0, w: this.app.doc.width, h: this.app.doc.height }
+    const W = wr.w
+    const H = wr.h
     if (b.w < 1e-6 || b.h < 1e-6) return
     const s = Math.min(W / b.w, H / b.h)
     const bc = { x: b.x + b.w / 2, y: b.y + b.h / 2 }
-    this.applyMap((p) => ({ x: W / 2 + (p.x - bc.x) * s, y: H / 2 + (p.y - bc.y) * s }))
+    this.applyMap((p) => ({ x: wr.x + W / 2 + (p.x - bc.x) * s, y: wr.y + H / 2 + (p.y - bc.y) * s }))
   }
 
   reset(): void {
@@ -343,10 +375,9 @@ export class TransformSession {
 
   // ------------------------------------------------------------------ hit testing / pointer
   private targets(): { xs: number[]; ys: number[] } {
-    const W = this.app.doc.width
-    const H = this.app.doc.height
-    const tx = [0, W / 2, W]
-    const ty = [0, H / 2, H]
+    const wr = this.inf ? workRect(this.app) : { x: 0, y: 0, w: this.app.doc.width, h: this.app.doc.height }
+    const tx = [wr.x, wr.x + wr.w / 2, wr.x + wr.w]
+    const ty = [wr.y, wr.y + wr.h / 2, wr.y + wr.h]
     const g = xs.snapGuides ? (this.app as any).guides : null
     try {
       const extra = g?.snapTargets?.() as { x?: number[]; y?: number[] } | undefined
@@ -565,6 +596,12 @@ export class TransformSession {
   // ------------------------------------------------------------------ finish
   private dispose(): void {
     this.done = true
+    for (const c of this.chunks) {
+      c.floats.forEach((f) => f.dispose())
+      c.mask?.dispose()
+    }
+    this.chunks = []
+    this.ie = []
     for (const e of this.entries) {
       e.orig.dispose()
       e.float.dispose()
@@ -578,6 +615,13 @@ export class TransformSession {
   cancel(): void {
     if (this.done) return
     const { doc } = this.app
+    if (this.inf) {
+      const rects = [this.srcRect, this.touched]
+      for (const e of this.ie) e.live.cancel()
+      for (const r of rects) if (r) doc.events.emit('change', { rect: r })
+      this.dispose()
+      return
+    }
     const R = clampToCanvas(unionRect(this.srcPadRect(), this.touched)!, doc.width, doc.height)
     if (R) {
       for (const e of this.entries) this.app.gpu.blit(e.orig, R, e.layer.surface, R.x, R.y)
@@ -588,7 +632,9 @@ export class TransformSession {
 
   /** Drop GPU resources without touching layers (document was replaced). */
   abandon(): void {
-    if (!this.done) this.dispose()
+    if (this.done) return
+    for (const e of this.ie) e.live.edit.abort()
+    this.dispose()
   }
 
   /** Bake into the layers as ONE undo step (plus the moved selection). */
@@ -598,6 +644,7 @@ export class TransformSession {
       this.cancel()
       return false
     }
+    if (this.inf) return this.commitInf()
     const { doc, gpu } = this.app
     const svc = this.app.selection
     const dst = this.dstRect()
@@ -628,6 +675,86 @@ export class TransformSession {
     })
     doc.emitCommit('transform', firstId, R, 'Transform')
     doc.events.emit('change', { rect: R })
+    this.dispose()
+    return true
+  }
+
+  // ------------------------------------------------------------------ infinite canvas
+  private initInf(layers: Layer[], rect: Rect): void {
+    const { doc } = this.app
+    for (const layer of layers) this.ie.push({ layer, live: new LiveTileEdit(doc, layer, 'Transform') })
+    const plan = chunkPlan(this.app, rect, PAD, HALO)
+    for (const core of plan.cores) {
+      this.chunks.push({
+        core,
+        halo: plan.halo,
+        floats: layers.map((l) => extractChunk(this.app, l, rect, core, plan.halo, this.hadSel)),
+        mask: this.hadSel ? extractChunk(this.app, null, rect, core, plan.halo, true) : null
+      })
+    }
+  }
+
+  /** Draw the whole mesh of every source chunk into the target whose pixel (0,0) is document (ox, oy). */
+  private drawChunks(target: Surface, ox: number, oy: number, mesh: ReturnType<typeof tessellate>, mask: boolean): void {
+    const v = mesh.verts.slice()
+    for (let i = 0; i < v.length; i += 4) {
+      v[i] -= ox
+      v[i + 1] -= oy
+    }
+    const m = { verts: v, indices: mesh.indices }
+    const single = this.chunks.length === 1
+    for (const c of this.chunks) {
+      const src = mask ? c.mask : c.floats[this.curLayer]
+      if (!src) continue
+      const sx = c.core.x - this.srcRect.x
+      const sy = c.core.y - this.srcRect.y
+      this.mesh.draw(target, null, m, src, this.box, c.halo, xs.interp, single ? undefined : { shift: [sx, sy], core: [sx, sy, sx + c.core.w, sy + c.core.h] })
+    }
+  }
+
+  private renderInf(): void {
+    const { doc } = this.app
+    const dst = this.dstRect()
+    const prev = this.touched
+    const mesh = this.meshData()
+    this.ie.forEach((e, li) => {
+      e.live.restore(prev)
+      e.live.restore(this.srcRect)
+      const sspans = e.live.prepare(this.srcRect, true)
+      removeSourceInf(this.app, e.live, sspans, this.srcRect, this.hadSel)
+      if (!dst) return
+      const dspans: TileSpan[] = e.live.prepare(dst)
+      this.curLayer = li
+      for (const s of dspans) this.drawChunks(s.surf, s.ox, s.oy, mesh, false)
+    })
+    this.touched = dst
+    for (const r of [this.srcRect, prev, dst]) if (r) doc.events.emit('change', { rect: r })
+    this.onChange?.()
+  }
+
+  private commitInf(): boolean {
+    const { doc, gpu } = this.app
+    const svc = this.app.selection
+    const dst = this.dstRect()
+    const src = this.srcRect
+    const mesh = this.meshData()
+    const firstId = this.ie[0].layer.id
+    let dirty: Rect | null = null
+    groupHistory(doc, 'Transform', (extra) => {
+      for (const e of this.ie) dirty = unionRect(dirty, e.live.commit())
+      if (this.hadSel && dst && this.chunks[0]?.mask) {
+        const r: Rect = { x: dst.x, y: dst.y, w: Math.min(dst.w, MAX_SEL_WINDOW, gpu.maxTexture), h: Math.min(dst.h, MAX_SEL_WINDOW, gpu.maxTexture) }
+        const nm = gpu.surface(r.w, r.h, 'rgba8', 0)
+        this.drawChunks(nm, r.x, r.y, mesh, true)
+        const data = readRedChannel(gpu, nm, { x: 0, y: 0, w: r.w, h: r.h })
+        nm.dispose()
+        svc.replaceWithRegion(r, data, src)
+        extra.push(svc.command('Transform selection', this.selBefore, svc.snapshot()))
+      }
+    })
+    const R2 = unionRect(unionRect(src, dst), dirty)
+    doc.emitCommit('transform', firstId, R2, 'Transform')
+    if (R2) doc.events.emit('change', { rect: R2 })
     this.dispose()
     return true
   }

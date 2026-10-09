@@ -1,0 +1,37 @@
+// Visual QA of the infinite-canvas tools (adjustments, liquify, clone, text, guides) in the real app. usage: node scripts/qa/qa-inf-tools.mjs --out out-infC
+import { launch, newDoc, setBrush, outDirOf, save } from './qa-inf-lib.mjs'
+const args = process.argv.slice(2)
+const { app, page, errors } = await launch(outDirOf(args))
+const T = 60000
+await newDoc(page, 'infinite')
+await page.evaluate(() => { const a = window.brushwork_app; a.setView({ cx: 60000, cy: 40000, zoom: 1, rot: 0 }) })
+await setBrush(page, 'hard-round', 70)
+const shot = async (n) => { await page.waitForTimeout(400); save('qa-inf-tools', n + '.png', await page.screenshot()) }
+// draw across a tile border with the real pointer path
+const sz = await page.evaluate(() => { const r = window.brushwork_app.canvas.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height } })
+const cx = sz.x + sz.w / 2, cy = sz.y + sz.h / 2
+await page.mouse.move(cx - 300, cy - 100); await page.mouse.down()
+for (let i = 0; i <= 30; i++) await page.mouse.move(cx - 300 + i * 20, cy - 100 + Math.sin(i / 4) * 80, { steps: 2 })
+await page.mouse.up()
+await shot('1-drawn')
+await page.evaluate(() => window.brushwork_app.adjustments.open('gaussian'))
+await page.waitForTimeout(500)
+await shot('2-gaussian-open')
+await page.keyboard.press('Enter')
+await shot('3-gaussian-applied')
+await page.evaluate(() => window.brushwork_app.adjustments.open('hsb'))
+await page.waitForTimeout(300)
+await page.evaluate(() => { const s = window.brushwork_app.adjustments.ui.session; s.setParam('hue', 80) })
+await shot('4-hsb-preview')
+await page.keyboard.press('Enter')
+await page.evaluate(() => { const g = window.brushwork_guides; g.set({ enabled: true, type: 'symmetry', symKind: 'quadrant' }) })
+await shot('5-symmetry-guide')
+await page.evaluate(() => { const g = window.brushwork_guides; g.set({ type: 'perspective' }) })
+await shot('6-perspective')
+await page.evaluate(() => { const g = window.brushwork_guides; g.set({ type: 'iso', gridSize: 80 }) })
+await shot('7-iso')
+await page.evaluate(() => window.brushwork_guides.set({ enabled: false }))
+await page.evaluate(() => window.brushwork_app.textLayers.addText('Infinite text'))
+await shot('8-text')
+console.log('errors', errors)
+await app.close()

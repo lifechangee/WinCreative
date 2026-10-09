@@ -86,7 +86,8 @@ export const REF_CARDS: RefCard[] = [
   { id: 'hideUI', group: 'mouse', anim: 'hideUI', keys: keysOf('ui.hideUI', 'ui.fullscreen'), lesson: 'quick' },
   { id: 'rightBtn', group: 'mouse', anim: 'click', now: () => bound(prefs.v.mouse.right) },
   { id: 'middleBtn', group: 'mouse', anim: 'mouse:', now: () => bound(prefs.v.mouse.middle) },
-  { id: 'xformKeys', group: 'mouse', anim: 'transform', keys: () => ['Shift', 'Alt'], lesson: 'selxf' }
+  { id: 'xformKeys', group: 'mouse', anim: 'transform', keys: () => ['Shift', 'Alt'], lesson: 'selxf' },
+  { id: 'smartKeys', group: 'mouse', anim: 'click', keys: () => ['W', 'Alt', 'N', 'Enter', 'Esc'], lesson: 'smart' }
 ]
 
 export const REF_GROUPS: RefGroup[] = ['touch', 'pen', 'layers', 'mouse']

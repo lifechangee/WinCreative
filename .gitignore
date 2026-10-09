@@ -32,3 +32,6 @@ bw-*-qa-*/
 Thumbs.db
 .vscode/
 .idea/
+release-*/
+resources/models/
+qa-inf/

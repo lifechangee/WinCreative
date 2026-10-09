@@ -1,8 +1,10 @@
 import type { App } from '../../app/app'
 import { unionRect } from '../../core/geometry'
+import { regionPieces, tileKey } from '../../core/tiles'
 import type { Rect, Sample } from '../../core/types'
 import type { Layer } from '../../doc/layer'
 import { FX } from '../../gl/filters'
+import { frameEnabled, frameRect, workRect } from '../frame/workRect'
 import type { Surface } from '../../gl/gpu'
 import { CloneTool } from './clone'
 import { defaultParams, getAdjustment } from './defs'
@@ -22,6 +24,35 @@ let selectionProvider: (() => SelectionMask | null) | null = null
 /** Hook for the selection feature: return the active selection's coverage texture (or null when nothing is selected). */
 export const setSelectionMaskProvider = (fn: (() => SelectionMask | null) | null): void => void (selectionProvider = fn)
 
+/** Selection coverage for a doc-space rect on an INFINITE canvas, supplied by features/selectxform (`app.selection.coverageRegion(rect)`: a new rect-sized surface with coverage in .r, or null = no selection). */
+function infCoverage(app: App, rect: Rect): (SelectionMask & { dispose(): void }) | null {
+  const sel = (app as unknown as { selection?: { coverageRegion?: (r: Rect) => Surface | null; readRect?: (r: Rect) => Uint8Array | null } }).selection
+  const s = sel?.coverageRegion?.(rect) ?? null
+  const fr = frameEnabled(app.doc) ? frameRect(app.doc) : null
+  const inside = !!fr && rect.x >= fr.x && rect.y >= fr.y && rect.x + rect.w <= fr.x + fr.w && rect.y + rect.h <= fr.y + fr.h
+  if (fr && !inside) {
+    // frame ON: the result is limited to frame x selection (this path runs over EVERY tile of the layer, so the frame is baked into the coverage here)
+    const cov = s ? (sel?.readRect?.(rect) ?? null) : null
+    const buf = new Uint8Array(rect.w * rect.h * 4)
+    for (let y = 0; y < rect.h; y++) {
+      const dy = rect.y + y
+      const rowIn = dy >= fr.y && dy < fr.y + fr.h
+      for (let x = 0; x < rect.w; x++) {
+        const dx = rect.x + x
+        const v = rowIn && dx >= fr.x && dx < fr.x + fr.w ? (cov ? cov[y * rect.w + x] : 255) : 0
+        const i = (y * rect.w + x) * 4
+        buf[i] = v
+        buf[i + 3] = 255
+      }
+    }
+    s?.dispose()
+    const m = app.gpu.surface(rect.w, rect.h, 'rgba8', 0)
+    app.gpu.uploadRGBA8(m, 0, 0, rect.w, rect.h, buf)
+    return { tex: m, channel: 'r', dispose: () => m.dispose() }
+  }
+  return s ? { tex: s, channel: 'r', dispose: () => s.dispose() } : null
+}
+
 export function getSelectionMask(app: App): SelectionMask | null {
   if (selectionProvider) return selectionProvider()
   // The selection feature exposes app.selection.mask: RGBA8 texture, coverage in .r (null = nothing selected).
@@ -30,6 +61,29 @@ export function getSelectionMask(app: App): SelectionMask | null {
 }
 
 export type Mode = 'layer' | 'pencil'
+
+/** result = lerp(orig, adj, pencil coverage x selection), honouring alpha lock; written into `target` (never one of the inputs). */
+function blendPass(fx: FX, orig: Surface, adj: Surface, cov: Surface | null, sel: SelectionMask | null, lock: boolean, target: Surface, r: Rect): void {
+  fx.pass(
+    'combine',
+    `uniform float uHasM, uHasS, uSelA, uLock;
+           vec4 fx(){ vec4 o0 = texture(uT0, vUv), a = texture(uT1, vUv); float m = 1.0;
+             if (uHasM > 0.5) m *= texture(uT2, vUv).a;
+             if (uHasS > 0.5) { vec4 s = texture(uT3, vUv); m *= uSelA > 0.5 ? s.a : s.r; }
+             vec4 r = mix(o0, a, m);
+             if (uLock > 0.5) { float k = r.a > 1e-5 ? o0.a / r.a : 0.0; r = vec4(r.rgb * k, o0.a); }
+             return r; }`,
+    target,
+    { tex: [orig, adj, cov, sel?.tex], u: { uHasM: cov ? 1 : 0, uHasS: sel ? 1 : 0, uSelA: sel?.channel === 'a' ? 1 : 0, uLock: lock ? 1 : 0 }, rect: r }
+  )
+}
+
+const MAX_WORK = 6144
+const MAX_PAD = 768
+const isect = (a: Rect, b: Rect): Rect | null => {
+  const x0 = Math.max(a.x, b.x), y0 = Math.max(a.y, b.y), x1 = Math.min(a.x + a.w, b.x + b.w), y1 = Math.min(a.y + a.h, b.y + b.h)
+  return x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null
+}
 
 interface UndoEntry {
   kind: 'param' | 'tool'
@@ -56,6 +110,12 @@ export class AdjustmentSession {
   preview = true
   activeKey: string
   readonly layer: Layer
+  /** surface the preview is shown on: the layer itself (fixed canvas) or a temporary copy of `rect` (infinite canvas) */
+  readonly work: Surface
+  /** infinite canvas: the working surface covers `rect` (doc space, padded); only `inner` (the work rect) is written back */
+  readonly inf: boolean
+  readonly rect: Rect
+  readonly inner: Rect
   readonly fx: FX
   readonly orig: Surface
   readonly adj: Surface
@@ -72,6 +132,9 @@ export class AdjustmentSession {
   private combineAll = true
   private closed = false
   private drag: { key: string; start: number; x0: number } | null = null
+  private quiet = false
+  private touched = new Set<number>()
+  private selInf: (SelectionMask & { dispose(): void }) | null | undefined
 
   constructor(
     readonly app: App,
@@ -85,10 +148,33 @@ export class AdjustmentSession {
     this.layer = doc.activeLayer
     this.params = { ...defaultParams(def), ...presetParams }
     this.activeKey = def.main ?? def.params.find((p) => (p.kind ?? 'slider') === 'slider')?.key ?? ''
-    this.fx = new FX(app.gpu, doc.width, doc.height, doc.format)
-    this.orig = app.gpu.surface(doc.width, doc.height, doc.format)
-    this.adj = app.gpu.surface(doc.width, doc.height, doc.format)
-    app.gpu.blit(this.layer.surface, { x: 0, y: 0, w: doc.width, h: doc.height }, this.orig, 0, 0)
+    this.inf = doc.isInfinite && !!this.layer.tiles
+    let refDim: number | undefined
+    if (this.inf) {
+      const max = Math.min(MAX_WORK, app.gpu.maxTexture)
+      let inner = workRect(app)
+      if (inner.w > max || inner.h > max) inner = { x: inner.x + Math.floor((inner.w - Math.min(inner.w, max)) / 2), y: inner.y + Math.floor((inner.h - Math.min(inner.h, max)) / 2), w: Math.min(inner.w, max), h: Math.min(inner.h, max) }
+      refDim = Math.max(inner.w, inner.h)
+      const pad = Math.min(MAX_PAD, Math.ceil((def.pad ?? 0) * refDim), Math.floor((Math.min(MAX_WORK + 2 * MAX_PAD, app.gpu.maxTexture) - refDim) / 2))
+      if (def.pad || def.local) {
+        // nothing to do outside the painted content: shrink the work rect to it (+ blur reach)
+        const b = this.layer.tiles!.bounds()
+        const clip = b ? isect(inner, { x: b.x - pad, y: b.y - pad, w: b.w + 2 * pad, h: b.h + 2 * pad }) : null
+        if (clip) inner = clip
+      }
+      this.inner = inner
+      this.rect = { x: inner.x - pad, y: inner.y - pad, w: inner.w + 2 * pad, h: inner.h + 2 * pad }
+      this.work = doc.readRegion(this.layer, this.rect)
+    } else {
+      this.rect = this.inner = { x: 0, y: 0, w: doc.width, h: doc.height }
+      this.work = this.layer.surface
+    }
+    const W = this.rect.w
+    const H = this.rect.h
+    this.fx = new FX(app.gpu, W, H, doc.format, refDim)
+    this.orig = app.gpu.surface(W, H, doc.format)
+    this.adj = app.gpu.surface(W, H, doc.format)
+    app.gpu.blit(this.work, { x: 0, y: 0, w: W, h: H }, this.orig, 0, 0)
     if (def.modes && def.modes.length === 1) this.mode = def.modes[0]
     if (this.mode === 'pencil') this.ensureTool()
     this.invalidate()
@@ -102,12 +188,14 @@ export class AdjustmentSession {
       app: this.app,
       fx: this.fx,
       layer: this.layer,
+      target: this.work,
       extra: this.extra,
       orig: this.orig,
       params: () => this.params,
       invalidate: (r) => this.invalidate(r),
       combine: (r) => this.requestCombine(r),
-      sourceMarker: (x, y, v) => this.onMarker(x, y, v)
+      changed: (r) => this.show(r),
+      sourceMarker: (x, y, v) => this.onMarker(x + this.rect.x, y + this.rect.y, v)
     }
     if (this.def.custom === 'liquify') this.tool = new LiquifyTool(ctx)
     else if (this.def.custom === 'clone') this.tool = new CloneTool(ctx)
@@ -192,12 +280,27 @@ export class AdjustmentSession {
   }
 
   // ------------------------------------------------------------------ pencil strokes
+  /** document coordinates -> working-surface coordinates */
+  private local(s: Sample): Sample {
+    return this.rect.x === 0 && this.rect.y === 0 ? s : { ...s, x: s.x - this.rect.x, y: s.y - this.rect.y }
+  }
+  /** Clone: set the source point (doc coordinates). */
+  setCloneSource(x: number, y: number): void {
+    ;(this.tool as CloneTool | null)?.setSource(x - this.rect.x, y - this.rect.y)
+  }
   toolBegin(s: Sample): boolean {
     this.ensureTool()
-    return this.tool!.begin(s)
+    return this.tool!.begin(this.local(s))
   }
   toolMove(ss: Sample[]): void {
-    this.tool?.move(ss)
+    this.tool?.move(ss.map((s) => this.local(s)))
+  }
+
+  /** What limits this adjustment on an infinite canvas: the frame, the visible area, or (pixel-local, Layer mode) preview in the view while Apply covers the whole layer. */
+  get limit(): 'frame' | 'view' | 'viewAll' | null {
+    if (!this.inf) return null
+    if (this.def.local && this.mode === 'layer') return 'viewAll'
+    return frameRect(this.app.doc) ? 'frame' : 'view'
   }
   toolEnd(): void {
     if (!this.tool) return
@@ -283,33 +386,47 @@ export class AdjustmentSession {
     return true
   }
 
+  private infSel(): (SelectionMask & { dispose(): void }) | null {
+    if (this.selInf === undefined) this.selInf = infCoverage(this.app, this.rect)
+    return this.selInf
+  }
+
   private combine(rect: Rect | null): void {
     const gpu = this.app.gpu
-    const layerSurf = this.layer.surface
-    const full = { x: 0, y: 0, w: layerSurf.w, h: layerSurf.h }
+    const surf = this.work
+    const full = { x: 0, y: 0, w: surf.w, h: surf.h }
     const r = rect ?? full
     if (!this.preview) {
-      gpu.blit(this.orig, r, layerSurf, r.x, r.y)
+      gpu.blit(this.orig, r, surf, r.x, r.y)
     } else {
       const cov = this.mode === 'pencil' ? this.tool?.coverage?.() ?? null : null
-      const sel = getSelectionMask(this.app)
+      const sel = this.inf ? this.infSel() : getSelectionMask(this.app)
       const lock = this.layer.alphaLock
-      if (!cov && !sel && !lock) gpu.blit(this.adj, r, layerSurf, r.x, r.y)
-      else
-        this.fx.pass(
-          'combine',
-          `uniform float uHasM, uHasS, uSelA, uLock;
-           vec4 fx(){ vec4 o0 = texture(uT0, vUv), a = texture(uT1, vUv); float m = 1.0;
-             if (uHasM > 0.5) m *= texture(uT2, vUv).a;
-             if (uHasS > 0.5) { vec4 s = texture(uT3, vUv); m *= uSelA > 0.5 ? s.a : s.r; }
-             vec4 r = mix(o0, a, m);
-             if (uLock > 0.5) { float k = r.a > 1e-5 ? o0.a / r.a : 0.0; r = vec4(r.rgb * k, o0.a); }
-             return r; }`,
-          layerSurf,
-          { tex: [this.orig, this.adj, cov, sel?.tex], u: { uHasM: cov ? 1 : 0, uHasS: sel ? 1 : 0, uSelA: sel?.channel === 'a' ? 1 : 0, uLock: lock ? 1 : 0 }, rect: r }
-        )
+      if (!cov && !sel && !lock) gpu.blit(this.adj, r, surf, r.x, r.y)
+      else blendPass(this.fx, this.orig, this.adj, cov, sel, lock, surf, r)
     }
-    this.app.doc.events.emit('change', { rect: r })
+    this.show(r)
+  }
+
+  /** `r` (working-surface coordinates) of `work` changed: make it visible. */
+  private show(r: Rect): void {
+    if (!this.inf) return void this.app.doc.events.emit('change', { rect: r })
+    if (this.quiet) return
+    this.putTiles(this.work, r)
+  }
+
+  /** Copy the inner part of `r` of `src` (working-surface coordinates) straight into the layer's tiles (preview; no undo). */
+  private putTiles(src: Surface, r: Rect): void {
+    const ir = isect(r, { x: this.inner.x - this.rect.x, y: this.inner.y - this.rect.y, w: this.inner.w, h: this.inner.h })
+    if (!ir) return
+    const store = this.layer.tiles!
+    const gpu = this.app.gpu
+    for (const p of regionPieces({ x: ir.x + this.rect.x, y: ir.y + this.rect.y, w: ir.w, h: ir.h })) {
+      const dst = store.ensure(p.tx, p.ty)
+      gpu.blit(src, { x: ir.x + p.dx, y: ir.y + p.dy, w: p.w, h: p.h }, dst, p.sx, p.sy)
+      this.touched.add(tileKey(p.tx, p.ty))
+    }
+    this.app.doc.events.emit('change', { rect: { x: ir.x + this.rect.x, y: ir.y + this.rect.y, w: ir.w, h: ir.h } })
   }
 
   // ------------------------------------------------------------------ finish
@@ -320,7 +437,7 @@ export class AdjustmentSession {
     return true
   }
 
-  /** Commit as ONE undo step (doc.beginPixelEdit) + a 'filter' commit event. Returns false if nothing changed. */
+  /** Commit as ONE undo step (doc.beginPixelEdit / writeRegion) + a 'filter' commit event. Returns false if nothing changed. */
   apply(): boolean {
     if (this.closed) return false
     this.tool?.cancel()
@@ -329,24 +446,82 @@ export class AdjustmentSession {
     let ok = false
     if (this.hasEffect && !this.layer.locked && doc.layers.includes(this.layer)) {
       this.preview = true
+      if (this.def.custom === 'clone') this.adjDirty = true // clone paints into `cloneAcc`: the adjustment output must be re-read
       this.flush()
-      const full = { x: 0, y: 0, w: doc.width, h: doc.height }
-      const rect = this.mode === 'layer' && !(this.def.custom === 'liquify' || this.def.custom === 'clone') ? full : this.tool?.bounds() ?? full
-      // restore the original pixels so the undo snapshot is the true "before"
-      gpu.blit(this.orig, full, this.layer.surface, 0, 0)
-      const edit = doc.beginPixelEdit(this.layer, adjName(this.def))
-      edit.save(rect)
-      if (this.adjDirty) {
-        this.def.render(this.fx, this.orig, this.adj, this.params, this.extra)
-        this.adjDirty = false
+      const full = { x: 0, y: 0, w: this.work.w, h: this.work.h }
+      const custom = this.def.custom === 'liquify' || this.def.custom === 'clone'
+      const rect = this.mode === 'layer' && !custom ? full : this.tool?.bounds() ?? full
+      if (this.inf) ok = this.applyInf(rect, custom)
+      else {
+        // restore the original pixels so the undo snapshot is the true "before"
+        gpu.blit(this.orig, full, this.layer.surface, 0, 0)
+        const edit = doc.beginPixelEdit(this.layer, adjName(this.def))
+        edit.save(rect)
+        if (this.adjDirty) {
+          this.def.render(this.fx, this.orig, this.adj, this.params, this.extra)
+          this.adjDirty = false
+        }
+        this.combine(rect)
+        const dirty = edit.finish()
+        doc.emitCommit('filter', this.layer.id, dirty, adjName(this.def))
+        ok = true
       }
-      this.combine(rect)
-      const dirty = edit.finish()
-      doc.emitCommit('filter', this.layer.id, dirty, adjName(this.def))
-      ok = true
     } else this.restore()
     this.close()
     return ok
+  }
+
+  private applyInf(rect: Rect, custom: boolean): boolean {
+    const doc = this.app.doc
+    const gpu = this.app.gpu
+    const label = adjName(this.def)
+    this.restoreTiles() // tiles are back to the true "before"
+    if (this.def.local && this.mode === 'layer' && !custom) return this.applyAllTiles(label)
+    if (this.adjDirty) {
+      this.def.render(this.fx, this.orig, this.adj, this.params, this.extra)
+      this.adjDirty = false
+    }
+    this.quiet = true
+    this.combine(rect)
+    this.quiet = false
+    const inner = { x: this.inner.x - this.rect.x, y: this.inner.y - this.rect.y, w: this.inner.w, h: this.inner.h }
+    const piece = isect(rect, inner) ?? inner
+    const tmp = gpu.surface(piece.w, piece.h, this.work.fmt, 0)
+    gpu.blit(this.work, piece, tmp, 0, 0)
+    const dirty = doc.writeRegion(this.layer, { x: piece.x + this.rect.x, y: piece.y + this.rect.y, w: piece.w, h: piece.h }, tmp, { undoLabel: label, type: 'filter' })
+    tmp.dispose()
+    return !!dirty
+  }
+
+  /** Pixel-local colour adjustment over EVERY tile of the layer (no region limit), one undo step. */
+  private applyAllTiles(label: string): boolean {
+    const doc = this.app.doc
+    const gpu = this.app.gpu
+    const store = this.layer.tiles!
+    const keys = [...store.keys()]
+    if (!keys.length) return false
+    const S = store.size
+    const fx = new FX(gpu, S, S, store.fmt)
+    const out = gpu.surface(S, S, store.fmt, 0)
+    const res = gpu.surface(S, S, store.fmt, 0)
+    const edit = doc.beginPixelEdit(this.layer, label)
+    const full = { x: 0, y: 0, w: S, h: S }
+    for (const key of keys) {
+      const tile = store.getKey(key)
+      if (!tile) continue
+      edit.saveKey(key)
+      const sel = infCoverage(this.app, store.tileRectOf(key))
+      this.def.render(fx, tile, out, this.params, this.extra)
+      blendPass(fx, tile, out, null, sel, this.layer.alphaLock, res, full)
+      gpu.blit(res, full, tile, 0, 0)
+      sel?.dispose()
+    }
+    fx.dispose()
+    out.dispose()
+    res.dispose()
+    const dirty = edit.finish()
+    doc.emitCommit('filter', this.layer.id, dirty, label)
+    return !!dirty
   }
 
   cancel(): void {
@@ -356,9 +531,18 @@ export class AdjustmentSession {
     this.close()
   }
 
+  /** infinite: put the original pixels of the work rect back into the tiles and free tiles the preview allocated */
+  private restoreTiles(): void {
+    this.putTiles(this.orig, { x: 0, y: 0, w: this.orig.w, h: this.orig.h })
+    this.layer.tiles?.prune([...this.touched])
+    this.touched.clear()
+    this.app.doc.events.emit('change', { rect: this.inner })
+  }
+
   private restore(): void {
     const doc = this.app.doc
     if (!doc.layers.includes(this.layer)) return
+    if (this.inf) return this.restoreTiles()
     this.app.gpu.blit(this.orig, { x: 0, y: 0, w: doc.width, h: doc.height }, this.layer.surface, 0, 0)
     doc.events.emit('change', { rect: null })
   }
@@ -372,6 +556,9 @@ export class AdjustmentSession {
     if (this.raf) cancelAnimationFrame(this.raf)
     this.tool?.dispose()
     this.tool = null
+    this.selInf?.dispose()
+    this.selInf = undefined
+    if (this.inf) this.work.dispose()
     this.fx.dispose()
     this.orig.dispose()
     this.adj.dispose()

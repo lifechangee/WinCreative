@@ -3,10 +3,13 @@ import { h } from '../../ui/dom'
 import { I18nRef, resolveText, t, tk } from '../../i18n'
 import { registerMenuItem } from '../../ui/registry'
 import type { UIContext } from '../../ui/registry'
-import { bitmapToDocument, exportPsdBytes, importPsdBytes, uploadBitmap } from '../../io/docPsd'
+import { layerFromImage } from '../layers/ops'
+import { bitmapToDocument, exportPsdBytes, importPsdBytes } from '../../io/docPsd'
 import { flattenedBitmap, layerBitmap } from '../../io/frameRender'
+import { exportAreas, getExportArea, setExportArea, type ExportArea } from '../frame/exportArea'
 import { Bitmap, decodeBitmap, encodeJpegBitmap, encodePngBitmap, encodeTiff, encodeWebp, flattenOnto, sniffImage } from '../../io/imageFormats'
 import { buildPdf } from '../../io/pdf'
+import { encodePngRows } from '../../io/asyncSave'
 import { loadBwk } from '../../io/bwk'
 import { importProcreate } from '../../io/procreate'
 import type { Document } from '../../doc/document'
@@ -16,6 +19,8 @@ import { openAnimExport } from './animExport'
 import { docMeta, embedDocProfile } from './docMeta'
 import { tagFromFile } from '../profiles/convert'
 import { btn, modal, numberInput, select } from './ui'
+import { withWorkDoc } from '../infinite/convert'
+import { variantFileName } from '../langvariants/model'
 
 type ImgFmt = 'png' | 'jpeg' | 'webp' | 'tiff' | 'psd'
 const FMT: Record<ImgFmt, { label: I18nRef; ext: string[] }> = {
@@ -29,15 +34,29 @@ const FMT: Record<ImgFmt, { label: I18nRef; ext: string[] }> = {
 const save = (defaultName: string, ext: string[], label: string, data: Uint8Array): Promise<string | null> => window.brushwork!.saveFile({ defaultName, filters: [{ name: label, extensions: ext }], data })
 
 /** Encode the flattened canvas (or PSD with layers) in the given format. */
-export async function encodeDocument(app: App, fmt: ImgFmt, opts: { quality: number; transparent: boolean }): Promise<Uint8Array> {
+/** PSD file format limit per side (PSB would allow more, ag-psd writes PSD) */
+const PSD_MAX_SIDE = 30000
+/** bitmaps above this many pixels are PNG-encoded in the Worker with progress instead of on the main thread */
+const BIG_PNG_PX = 16e6
+
+export async function encodeDocument(app: App, fmt: ImgFmt, opts: { quality: number; transparent: boolean; onProgress?: (f: number) => void; lang?: string }): Promise<Uint8Array> {
+  if (fmt === 'psd' && app.doc.isInfinite) {
+    // infinite canvas: a normal bounded PSD of the frame (else the content bounds) with layers, groups and blend modes
+    const r = await withWorkDoc(app, (a) => encodeDocument(a, fmt, opts))
+    if (!r) throw new Error(t('ui.inf.nothingToExport'))
+    return r
+  }
   const doc = app.doc
-  if (fmt === 'psd') return embedDocProfile(doc, 'psd', await exportPsdBytes(app.gpu, doc, app.compositor))
+  if (fmt === 'psd') {
+    if (doc.width > PSD_MAX_SIDE || doc.height > PSD_MAX_SIDE) throw new Error(t('animio.share.psd.tooBig', { max: PSD_MAX_SIDE, w: doc.width, h: doc.height }))
+    return embedDocProfile(doc, 'psd', await exportPsdBytes(app.gpu, doc, app.compositor))
+  }
   const noAlpha = fmt === 'jpeg'
-  const bmp = flattenedBitmap(app.compositor, doc, !opts.transparent || noAlpha)
+  const bmp = flattenedBitmap(app.compositor, doc, !opts.transparent || noAlpha, opts.lang)
   if (noAlpha) flattenOnto(bmp)
   switch (fmt) {
     case 'png':
-      return embedDocProfile(doc, 'png', await encodePngBitmap(bmp))
+      return embedDocProfile(doc, 'png', bmp.width * bmp.height > BIG_PNG_PX ? await encodePngRows(bmp.data, bmp.width, bmp.height, opts.onProgress) : await encodePngBitmap(bmp))
     case 'jpeg':
       return embedDocProfile(doc, 'jpeg', await encodeJpegBitmap(bmp, opts.quality))
     case 'webp':
@@ -49,7 +68,7 @@ export async function encodeDocument(app: App, fmt: ImgFmt, opts: { quality: num
 
 function exportImageDialog(app: App, ui: UIContext): void {
   const m = modal(tk('animio.share.image.title'))
-  const st = { fmt: 'png' as ImgFmt, quality: 92, transparent: !app.doc.background.visible }
+  const st = { fmt: 'png' as ImgFmt, quality: 92, transparent: !app.doc.background.visible, langs: 'current' as 'current' | 'all' }
   const q = numberInput(st.quality, 1, 100, (v) => (st.quality = v))
   const tr = h('input', { type: 'checkbox', checked: st.transparent })
   tr.addEventListener('change', () => (st.transparent = tr.checked))
@@ -61,14 +80,28 @@ function exportImageDialog(app: App, ui: UIContext): void {
   }
   m.onLang(() => statusFn && (status.textContent = statusFn()))
   m.body.append(
-    h('div', { class: 'an-grid' }, h('label', { text: tk('animio.common.format') }), select<ImgFmt>((Object.keys(FMT) as ImgFmt[]).map((k) => [k, FMT[k].label] as [ImgFmt, I18nRef]), st.fmt, (v) => (st.fmt = v)), h('label', { text: tk('animio.share.image.quality') }), q, h('label', { text: tk('animio.common.transparency') }), h('label', { class: 'chk' }, tr, h('span', { text: tk('animio.share.image.keepTransparent') }))),
+    h('div', { class: 'an-grid' }, h('label', { text: tk('frame.area') }), select<ExportArea>(exportAreas(app.doc).map((k) => [k, tk('frame.area.' + k)] as [ExportArea, I18nRef]), getExportArea(app.doc), (v) => setExportArea(app.doc, v)), h('label', { text: tk('animio.common.format') }), select<ImgFmt>((Object.keys(FMT) as ImgFmt[]).map((k) => [k, FMT[k].label] as [ImgFmt, I18nRef]), st.fmt, (v) => (st.fmt = v)), h('label', { text: tk('animio.share.image.quality') }), q, h('label', { text: tk('animio.common.transparency') }), h('label', { class: 'chk' }, tr, h('span', { text: tk('animio.share.image.keepTransparent') })), ...(app.doc.hasLangLayers ? [h('label', { text: tk('langs.exp.language') }), select<'current' | 'all'>([['current', tk('langs.exp.langCurrent')], ['all', tk('langs.exp.langAll')]], st.langs, (v) => (st.langs = v))] : [])),
     status
   )
   m.footer.append(
     btn(tk('core.common.close'), () => m.close()),
     btn(tk('animio.common.exportEllipsis'), async () => {
       try {
-        const data = await encodeDocument(app, st.fmt, { quality: st.quality / 100, transparent: st.transparent })
+        if (app.doc.hasLangLayers && st.langs === 'all' && st.fmt !== 'psd') {
+          // one file per language: name.en.png, name.ru.png ... (a PSD keeps every language as layers in ONE file)
+          const out = await animioApi().ff.pickPath({ defaultName: app.doc.name + '.' + FMT[st.fmt].ext[0], filters: [{ name: resolveText(FMT[st.fmt].label), extensions: FMT[st.fmt].ext }] })
+          if (!out) return
+          const dir = out.replace(/[\\/][^\\/]*$/, '')
+          const base = out.slice(dir.length + 1)
+          const files: { name: string; data: Uint8Array }[] = []
+          for (const l of app.doc.langs) files.push({ name: variantFileName(base, l.code), data: await encodeDocument(app, st.fmt, { quality: st.quality / 100, transparent: st.transparent, lang: l.code }) })
+          await animioApi().writeFiles(dir, files)
+          const n = files.length
+          setStatus(() => t('langs.exp.savedAll', { n }))
+          ui.toast(t('animio.share.image.done'))
+          return
+        }
+        const data = await encodeDocument(app, st.fmt, { quality: st.quality / 100, transparent: st.transparent, onProgress: (f) => setStatus(() => t('animio.share.image.encoding', { pct: Math.round(f * 100) })) })
         const p = await save(`${app.doc.name}.${FMT[st.fmt].ext[0]}`, FMT[st.fmt].ext, resolveText(FMT[st.fmt].label), data)
         if (p) {
           setStatus(() => t('animio.common.savedTo', { path: p }))
@@ -82,6 +115,7 @@ function exportImageDialog(app: App, ui: UIContext): void {
 }
 
 async function exportLayersPng(app: App, ui: UIContext): Promise<void> {
+  if (app.doc.isInfinite) return void (await withWorkDoc(app, (a) => exportLayersPng(a, ui)))
   const dir = await animioApi().ff.pickDir(t('animio.share.layersPng.pickFolder'))
   if (!dir) return
   const files: { name: string; data: Uint8Array }[] = []
@@ -95,6 +129,7 @@ async function exportLayersPng(app: App, ui: UIContext): Promise<void> {
 }
 
 async function exportLayersPdf(app: App, ui: UIContext): Promise<void> {
+  if (app.doc.isInfinite) return void (await withWorkDoc(app, (a) => exportLayersPdf(a, ui)))
   const pages = []
   for (const l of [...app.doc.paintLayers].reverse()) {
     const b = layerBitmap(app.gpu, app.doc, l)
@@ -105,7 +140,19 @@ async function exportLayersPdf(app: App, ui: UIContext): Promise<void> {
   if (await save(app.doc.name + '-layers.pdf', ['pdf'], 'PDF', data)) ui.toast(t('animio.share.layersPdf.done'))
 }
 
+/** One-page PDF of the work area (frame, else content bounds) of an infinite canvas. */
+export async function exportWorkPdf(app: App, ui: UIContext): Promise<void> {
+  const meta = docMeta(app.doc)
+  const name = app.doc.name
+  await withWorkDoc(app, async (a) => {
+    const b = flattenedBitmap(a.compositor, a.doc, true)
+    const data = await buildPdf([{ image: await encodePngBitmap(b), format: 'png' as const, width: b.width, height: b.height }], meta.dpi, { title: name, author: meta.author })
+    if (await save(name + '.pdf', ['pdf'], 'PDF', data)) ui.toast(t('animio.page.pdf.done'))
+  })
+}
+
 async function copyCanvas(app: App, ui: UIContext): Promise<void> {
+  if (app.doc.isInfinite) return void (await withWorkDoc(app, (a) => copyCanvas(a, ui)))
   const bmp = flattenedBitmap(app.compositor, app.doc, true)
   const png = await encodePngBitmap(bmp)
   await navigator.clipboard.write([new ClipboardItem({ 'image/png': new Blob([png as unknown as BlobPart], { type: 'image/png' }) })])
@@ -170,8 +217,8 @@ async function insertImage(app: App, ui: UIContext): Promise<void> {
     c.drawImage(src, 0, 0, w, hh)
     data = c.getImageData(0, 0, w, hh).data
   }
-  const layer = doc.createLayer({ name: r.path.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '') })
-  uploadBitmap(app.gpu, doc, layer, { x: Math.round((doc.width - w) / 2), y: Math.round((doc.height - hh) / 2), width: w, height: hh, data })
+  // frame ON: only the part inside the frame is kept (layerFromImage)
+  const layer = layerFromImage(doc, { x: Math.round((doc.width - w) / 2), y: Math.round((doc.height - hh) / 2), w, h: hh, data }, r.path.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, ''))
   doc.insertLayer(layer, doc.getLayer(doc.activeId) ? { id: doc.activeId, where: 'above' } : null, 'Insert image')
   ui.toast(t('animio.share.inserted'))
 }

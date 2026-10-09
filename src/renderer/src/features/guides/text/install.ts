@@ -2,6 +2,7 @@ import type { App } from '../../../app/app'
 import type { Rect } from '../../../core/types'
 import type { Document } from '../../../doc/document'
 import { registerBwkExtension } from '../../../io/bwk'
+import { putRegionPixels } from '../../../doc/regionPut'
 import { strokeHooks } from '../../../tools/strokeHooks'
 import { t as tr, tEl, tk } from '../../../i18n'
 import { h } from '../../../ui/dom'
@@ -117,22 +118,32 @@ export class TextManager {
     const layer = doc.getLayer(id)
     const t = this.get(id)
     if (!layer) return null
-    const prev = this.lastRect.get(id) ?? null
+    const inf = !!layer.tiles
+    let prev = this.lastRect.get(id) ?? null
+    if (inf && prev === 'full') {
+      // pixels of unknown extent (loaded document): the layer holds nothing but this text, so drop all of its tiles
+      for (const k of [...layer.tiles!.keys()]) layer.tiles!.free(k)
+      prev = null
+    }
     const full: Rect = { x: 0, y: 0, w: doc.width, h: doc.height }
-    const r = t ? renderText(t, doc.width, doc.height) : null
+    const r = t ? renderText(t, doc.width, doc.height, inf) : null
     let u: Rect | null = prev === 'full' ? full : prev
     if (r) {
       const rr: Rect = { x: r.x, y: r.y, w: r.canvas.width, h: r.canvas.height }
       u = u ? union(u, rr) : rr
     }
-    if (!u || u.w <= 0 || u.h <= 0) return null
+    if (!u || u.w <= 0 || u.h <= 0) {
+      if (inf) doc.events.emit('change', { rect: null })
+      return null
+    }
     const cv = document.createElement('canvas')
     cv.width = u.w
     cv.height = u.h
     const ctx = cv.getContext('2d', { willReadFrequently: true })!
     if (r) ctx.drawImage(r.canvas, r.x - u.x, r.y - u.y)
     const data = ctx.getImageData(0, 0, u.w, u.h)
-    doc.gpu.uploadRGBA8(layer.pixels, u.x, u.y, u.w, u.h, data.data)
+    if (inf) putRegionPixels(doc, layer, u, data.data)
+    else doc.gpu.uploadRGBA8(layer.pixels, u.x, u.y, u.w, u.h, data.data)
     this.lastRect.set(id, r ? { x: r.x, y: r.y, w: r.canvas.width, h: r.canvas.height } : null)
     doc.events.emit('change', { rect: u })
     return u
@@ -214,7 +225,7 @@ export class TextManager {
     this.flush()
     const c = this.overlay.toDoc(this.overlay.w / 2, this.overlay.h / 2)
     const layer = doc.addLayer({ name: tr('guides.text.defaultText') })
-    const w = Math.min(doc.width * 0.8, 600)
+    const w = doc.isInfinite ? Math.min((this.overlay.w / app.view.zoom) * 0.8, 600) : Math.min(doc.width * 0.8, 600)
     const t: TextData = { text, style: { ...this.defaults }, spans: [], x: c.x - w / 2, y: c.y - this.defaults.size, w, rot: -app.view.rot }
     this.map().set(layer.id, t)
     this.lastRect.set(layer.id, null)

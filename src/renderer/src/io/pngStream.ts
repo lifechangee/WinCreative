@@ -69,21 +69,43 @@ export class PngStream {
 
   finish(): Uint8Array {
     this.z.push(new Uint8Array(0), true)
-    const ihdr = new Uint8Array(13)
-    const v = new DataView(ihdr.buffer)
-    u32(v, 0, this.w)
-    u32(v, 4, this.h)
-    ihdr[8] = 8
-    ihdr[9] = 6
     const all = new Uint8Array(this.bytes)
     let o = 0
     for (const p of this.parts) (all.set(p, o), (o += p.length))
-    const pieces: Uint8Array[] = [Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10), chunk('IHDR', ihdr)]
-    for (let i = 0; i < all.length; i += 1 << 20) pieces.push(chunk('IDAT', all.subarray(i, Math.min(all.length, i + (1 << 20)))))
-    pieces.push(chunk('IEND', new Uint8Array(0)))
-    const out = new Uint8Array(pieces.reduce((a, b) => a + b.length, 0))
-    o = 0
-    for (const p of pieces) (out.set(p, o), (o += p.length))
-    return out
+    return assemblePng(this.w, this.h, all)
   }
+}
+
+/** RGBA8 PNG file from the zlib stream of its (Sub-filtered) scanlines. */
+export function assemblePng(w: number, h: number, all: Uint8Array): Uint8Array {
+  const ihdr = new Uint8Array(13)
+  const v = new DataView(ihdr.buffer)
+  u32(v, 0, w)
+  u32(v, 4, h)
+  ihdr[8] = 8
+  ihdr[9] = 6
+  const pieces: Uint8Array[] = [Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10), chunk('IHDR', ihdr)]
+  for (let i = 0; i < all.length; i += 1 << 20) pieces.push(chunk('IDAT', all.subarray(i, Math.min(all.length, i + (1 << 20)))))
+  pieces.push(chunk('IEND', new Uint8Array(0)))
+  const out = new Uint8Array(pieces.reduce((a, b) => a + b.length, 0))
+  let o = 0
+  for (const p of pieces) (out.set(p, o), (o += p.length))
+  return out
+}
+
+/** PNG "Sub" filter of straight RGBA8 rows (row = 1 filter byte + w*4 bytes). */
+export function filterSub(src: Uint8Array, w: number): Uint8Array {
+  const stride = w * 4
+  const n = Math.floor(src.length / stride)
+  const out = new Uint8Array(n * (stride + 1))
+  let so = 0
+  let d = 0
+  for (let r = 0; r < n; r++) {
+    out[d++] = 1
+    for (let i = 0; i < 4; i++) out[d + i] = src[so + i]
+    for (let i = 4; i < stride; i++) out[d + i] = (src[so + i] - src[so + i - 4]) & 255
+    d += stride
+    so += stride
+  }
+  return out
 }

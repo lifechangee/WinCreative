@@ -1,4 +1,4 @@
-import { app, clipboard, ipcMain, nativeImage } from 'electron'
+import { app, clipboard, ClipboardItem, ipcMain } from 'electron'
 
 /** OS clipboard image in/out for the Layers feature (Copy / Paste / Copy All). */
 export function registerLayersIpc(): void {
@@ -9,12 +9,17 @@ export function registerLayersIpc(): void {
     console.log('[layers-test] done ok=' + ok)
     setTimeout(() => app.exit(ok ? 0 : 1), 100)
   })
-  ipcMain.handle('layers:clipboardWriteImage', (_e, png: Uint8Array) => {
-    (clipboard as any).writeImage(nativeImage.createFromBuffer(Buffer.from(png)))
+  // Electron >= 44: the main-process clipboard is the async W3C-style API (write/read of ClipboardItem); writeImage/readImage are gone.
+  ipcMain.handle('layers:clipboardWriteImage', async (_e, png: Uint8Array) => {
+    await clipboard.write([new ClipboardItem({ 'image/png': new Blob([Buffer.from(png)], { type: 'image/png' }) })])
     return true
   })
-  ipcMain.handle('layers:clipboardReadImage', () => {
-    const img = (clipboard as any).readImage()
-    return img.isEmpty() ? null : new Uint8Array(img.toPNG())
+  ipcMain.handle('layers:clipboardReadImage', async () => {
+    const items = await clipboard.read()
+    const it = items.find((i) => i.types.includes('image/png'))
+    if (!it) return null
+    const blob = (await it.getType('image/png')) as Blob
+    const buf = new Uint8Array(await blob.arrayBuffer())
+    return buf.length ? buf : null
   })
 }

@@ -246,7 +246,7 @@ export function installGallery(app: App, ui: UIContext): void {
       'div',
       { class: 'bw-info' },
       ...[
-        [t('gallery.info.size'), `${it.width} × ${it.height} px`],
+        [t('gallery.info.size'), (it.infinite ? t('gallery.card.infinitePrefix') : '') + `${it.width} × ${it.height} px`],
         [t('gallery.info.layers'), String(it.layers)],
         [t('gallery.info.profile'), it.profile],
         ['DPI', String(it.dpi)],
@@ -329,7 +329,7 @@ export function installGallery(app: App, ui: UIContext): void {
         thumbBox.append(t)
       })
     }
-    const meta = e.kind === 'item' ? t('gallery.card.metaItem', { w: e.item.width, h: e.item.height, count: e.item.layers }) : t('gallery.card.metaStack', { count: store.stackItems(e.stack.id).length })
+    const meta = e.kind === 'item' ? (e.item.infinite ? t('gallery.card.infinitePrefix') : '') + t('gallery.card.metaItem', { w: e.item.width, h: e.item.height, count: e.item.layers }) : t('gallery.card.metaStack', { count: store.stackItems(e.stack.id).length })
     const nameEl = h('div', { class: 'name', text: name, title: t('gallery.card.clickToRename') })
     nameEl.addEventListener('click', (ev) => {
       ev.stopPropagation()
@@ -606,6 +606,7 @@ export function installGallery(app: App, ui: UIContext): void {
   galleryRef.ready = (async () => {
     if (!window.bwGallery) return
     await store.load()
+    const recoveryNote = await window.brushwork?.takeRecoveryNotice?.() // set when this page load follows a renderer crash / GPU reset
     const selftest = await window.brushwork?.isSelfTest()
     const colorTest = (await window.bwGallery.env('BW_COLOR_SELFTEST')) === '1' || (await window.bwGallery.env('BW_PERF_TEST')) === '1' || (await window.bwGallery.env('BW_PERF_SELFTEST')) === '1'
     store.startAutosave()
@@ -614,6 +615,7 @@ export function installGallery(app: App, ui: UIContext): void {
     if (await window.brushwork?.hasOpenFiles?.()) return // launched with a file (double-click .bwk): it opens instead of the last artwork
     const last = store.lastOpened && store.get(store.lastOpened)
     if (last && !last.deleted) await guard('reopen', () => store.open(last.id))
+    if (recoveryNote) app.notify(recoveryNote)
   })()
 }
 

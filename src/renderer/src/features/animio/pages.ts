@@ -14,6 +14,8 @@ import { registerMenuItem } from '../../ui/registry'
 import type { UIContext } from '../../ui/registry'
 import { animioApi } from './api'
 import { docMeta } from './docMeta'
+import { exportWorkPdf } from './shareUi'
+import { requireFrame } from '../frame/needFrame'
 import { ThumbMaker } from './thumbs'
 import { btn, ensureStyles, modal, select } from './ui'
 
@@ -256,12 +258,15 @@ export function installPagesUi(app: App, ui: UIContext, hooks: { onEnable?: () =
       group: 'canvas',
       label: pa.enabled ? tk('animio.menu.page.on') : tk('animio.menu.page.off'),
       run: () => {
-        if (!pa.enabled) hooks.onEnable?.()
-        pa.setEnabled(!pa.enabled)
+        if (pa.enabled) return pa.setEnabled(false)
+        requireFrame(app, 'page', () => {
+          hooks.onEnable?.()
+          pa.setEnabled(true)
+        })
       }
     })
   refreshMenu()
-  registerMenuItem('actions', { id: 'share-pdf', group: 'share', label: tk('animio.menu.sharePdf'), run: () => openPdfDialog(app, ui, pa) })
+  registerMenuItem('actions', { id: 'share-pdf', group: 'share', label: tk('animio.menu.sharePdf'), run: () => (app.doc.isInfinite && !pa.enabled ? void exportWorkPdf(app, ui) : openPdfDialog(app, ui, pa)) })
   registerMenuItem('actions', { id: 'share-pages-img', group: 'share', label: tk('animio.menu.sharePagesPng'), run: () => void exportPagesImages(app, ui, pa) })
   return pa
 }

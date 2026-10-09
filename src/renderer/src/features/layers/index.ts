@@ -6,6 +6,7 @@ import { registerMenuItem, registerPanel, UIContext } from '../../ui/registry'
 import { tk, t, type I18nText } from '../../i18n'
 import { actionsFor } from './actions'
 import { layerHooks } from './ops'
+import { installInfMaskStorage } from './infMask'
 
 /**
  * Feature module 'layers' — installed once at startup after buildUI().
@@ -15,6 +16,7 @@ import { layerHooks } from './ops'
 export function install(app: App, uiArg: unknown): void {
   const ui = uiArg as UIContext
   const act = actionsFor(app, (m) => ui.toast(m))
+  installInfMaskStorage(app)
 
   registerPanel({ id: 'layers', title: tk('layers.panel.title'), width: 340, render: renderLayerPanel })
 

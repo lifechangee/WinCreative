@@ -9,6 +9,7 @@ import { setSelectionMaskProvider } from '../adjustments/session'
 import { registerSelectionMaskProvider } from '../color/colorDrop'
 import { clearSelection, copyPaste, selectLayerContents } from './actions'
 import { Bar } from './bar'
+import { workRect } from '../frame/workRect'
 import { Overlay, installAnts } from './overlay'
 import { SelectionService } from './selection'
 import { rleDecode, rleEncode } from './rle'
@@ -26,7 +27,7 @@ export function install(app: App, ui: unknown): void {
   ;(window as any).brushwork_selection = svc
 
   // hooks other feature modules expose for the selection
-  registerSelectionMaskProvider((doc) => (svc.data && doc === app.doc ? svc.data : null))
+  registerSelectionMaskProvider((doc, rect) => (svc.data && doc === app.doc ? (rect && doc.isInfinite ? svc.readRect(rect) : svc.data) : null))
   setSelectionMaskProvider(() => (svc.mask ? { tex: svc.mask, channel: 'r' } : null))
 
   // saved selections ("Save & Load") travel with the document: extra.selections = [{name, rect, file}], file = RLE mask
@@ -123,6 +124,8 @@ export function install(app: App, ui: unknown): void {
   }
 
   // pasted / duplicated layers open the transform tool right away (layers module calls this hook after inserting)
+  layerHooks.workRect = () => workRect(app)
+  layerHooks.selectionBounds = () => svc.bounds()
   layerHooks.beginTransform = (layer) => {
     if (app.doc.getLayer(layer.id)) app.doc.setActive(layer.id)
     activateTransform('freeform')

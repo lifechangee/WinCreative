@@ -4,6 +4,15 @@ import type { Document } from '../doc/document'
 import { encodeJpeg, encodePng, saveBwk, loadBwk } from './bwk'
 import type { GPU } from '../gl/gpu'
 import { embedDocProfile } from '../features/animio/docMeta'
+import { readExportArea } from '../features/frame/exportArea'
+
+/**
+ * Flattened pixels for PNG / JPEG export of the chosen export area (features/frame/exportArea.ts): the frame when there is one, else the
+ * whole canvas (fixed) / the tight bounds of the painted content (infinite; scaled down only above the GPU texture limit or 100 Mpx).
+ */
+export function flatForExport(doc: Document, comp: Compositor, withBackground: boolean): { px: Uint8ClampedArray; w: number; h: number } {
+  return readExportArea(doc, comp, withBackground)
+}
 
 /** Thin wrappers over the Electron preload API (window.brushwork). */
 const api = (): NonNullable<Window['brushwork']> => {
@@ -12,13 +21,13 @@ const api = (): NonNullable<Window['brushwork']> => {
 }
 
 export async function exportPng(doc: Document, comp: Compositor, transparent = true): Promise<string | null> {
-  const px = comp.readFlattened(!transparent)
-  const data = embedDocProfile(doc, 'png', await encodePng(px, doc.width, doc.height))
+  const f = flatForExport(doc, comp, !transparent)
+  const data = embedDocProfile(doc, 'png', await encodePng(f.px, f.w, f.h))
   return api().saveFile({ defaultName: doc.name + '.png', filters: [{ name: t('core.filter.png'), extensions: ['png'] }], data })
 }
 
 export async function exportJpg(doc: Document, comp: Compositor, quality = 0.92): Promise<string | null> {
-  const px = comp.readFlattened(true)
+  const { px, w, h } = flatForExport(doc, comp, true)
   // JPEG has no alpha: if the background is hidden, flatten onto white
   if (!doc.background.visible) {
     for (let i = 0; i < px.length; i += 4) {
@@ -29,7 +38,7 @@ export async function exportJpg(doc: Document, comp: Compositor, quality = 0.92)
       px[i + 3] = 255
     }
   }
-  const data = embedDocProfile(doc, 'jpeg', await encodeJpeg(px, doc.width, doc.height, quality))
+  const data = embedDocProfile(doc, 'jpeg', await encodeJpeg(px, w, h, quality))
   return api().saveFile({ defaultName: doc.name + '.jpg', filters: [{ name: t('core.filter.jpeg'), extensions: ['jpg', 'jpeg'] }], data })
 }
 

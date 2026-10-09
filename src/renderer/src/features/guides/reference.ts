@@ -3,6 +3,7 @@ import { rgbToHsv } from '../../app/state'
 import { I18nRef, t, tk } from '../../i18n'
 import { h } from '../../ui/dom'
 import { registerMenuItem } from '../../ui/registry'
+import { frameRect } from '../frame/workRect'
 import { injectCss } from './widgets'
 
 type Src = { w: number; h: number; draw(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void }
@@ -68,13 +69,24 @@ export function installReference(app: App): { open(): void; close(): void } {
     dirty = false
     if (app.engine.active) return void (dirty = true)
     const doc = app.doc
-    const px = app.compositor.readFlattened(true)
+    let px: Uint8ClampedArray
+    let W = doc.width
+    let H = doc.height
+    if (doc.isInfinite) {
+      // infinite canvas: the frame if there is one, else the content bounds (downscaled to <= 2048 px)
+      const rect = frameRect(doc) ?? doc.contentBounds() ?? { x: 0, y: 0, w: 1, h: 1 }
+      const k = Math.min(1, 2048 / Math.max(rect.w, rect.h))
+      const img = app.compositor.readFlattened(rect, k, true)
+      px = img.px
+      W = img.w
+      H = img.h
+    } else px = app.compositor.readFlattened(true)
     const c = mirror?.c ?? document.createElement('canvas')
-    const first = !mirror || c.width !== doc.width || c.height !== doc.height
-    c.width = doc.width
-    c.height = doc.height
-    c.getContext('2d')!.putImageData(new ImageData(px as unknown as Uint8ClampedArray<ArrayBuffer>, doc.width, doc.height), 0, 0)
-    mirror = { c, w: doc.width, h: doc.height, draw: (g, x, y, w, hh) => g.drawImage(c, x, y, w, hh) }
+    const first = !mirror || c.width !== W || c.height !== H
+    c.width = W
+    c.height = H
+    c.getContext('2d')!.putImageData(new ImageData(px as unknown as Uint8ClampedArray<ArrayBuffer>, W, H), 0, 0)
+    mirror = { c, w: W, h: H, draw: (g, x, y, w, hh) => g.drawImage(c, x, y, w, hh) }
     if (first) fit()
     else draw()
     app.requestRender()

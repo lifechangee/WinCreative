@@ -43,6 +43,10 @@ export interface AdjDef {
   custom?: 'curves' | 'gradient' | 'liquify' | 'clone'
   /** true when the adjustment ignores drag-to-adjust (curves...) */
   noDrag?: boolean
+  /** pixel-local colour adjustment: on an infinite canvas Apply covers every tile of the layer (no region limit) */
+  local?: boolean
+  /** infinite canvas: fraction of the work-rect size to pad the working surface with so neighbourhood filters are exact at the edges */
+  pad?: number
   /** src -> dst (both canvas-sized surfaces; never the same one). Must fully write dst. */
   render(fx: FX, src: Surface, dst: Surface, p: Params, x: Extra): void
 }
@@ -56,10 +60,14 @@ export interface ToolCtx {
   app: App
   fx: FX
   layer: Layer
+  /** surface the preview is drawn into (the layer's own surface on a fixed canvas, a temporary region copy on an infinite one) */
+  target: Surface
   extra: Extra
   /** untouched layer pixels from session start */
   orig: Surface
   params(): Params
+  /** `target` pixels changed in this (surface-local) rect: show them */
+  changed(rect: import('../../core/types').Rect): void
   /** the adjustment output must be recomputed (liquify field changed, ...) */
   invalidate(rect?: import('../../core/types').Rect | null): void
   /** only the combine/preview step must be redone in this rect */

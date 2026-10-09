@@ -21,6 +21,10 @@ export interface GuideState {
   gridSize: number
   /** degrees */
   gridRotation: number
+  /** a point the 2D / isometric grid lines pass through (doc coords; infinite canvas: doc origin or the frame centre) */
+  gridOrigin: Pt
+  /** infinite canvas: symmetry centre / vanishing points were positioned (at first enable) - not moved again */
+  placed: boolean
   isoPlane: IsoPlane
   /** perspective vanishing points (1..3), document coords */
   vps: Pt[]
@@ -41,6 +45,8 @@ export function defaultGuide(w: number, h: number): GuideState {
     thickness: 1.5,
     gridSize: 64,
     gridRotation: 0,
+    gridOrigin: { x: 0, y: 0 },
+    placed: false,
     isoPlane: 'all',
     vps: [{ x: w / 2, y: h * 0.4 }],
     symKind: 'vertical',
@@ -66,6 +72,8 @@ export function normalizeGuide(raw: unknown, w: number, h: number): GuideState {
     thickness: num(r.thickness, d.thickness, 0.5, 12),
     gridSize: num(r.gridSize, d.gridSize, 4, 2048),
     gridRotation: num(r.gridRotation, 0, -360, 360),
+    gridOrigin: pt(r.gridOrigin, d.gridOrigin),
+    placed: !!r.placed,
     isoPlane: (['all', 'top', 'left', 'right'] as IsoPlane[]).includes(r.isoPlane as IsoPlane) ? (r.isoPlane as IsoPlane) : 'all',
     vps: vps.length ? vps : d.vps,
     symKind: (['vertical', 'horizontal', 'quadrant', 'radial'] as SymKind[]).includes(r.symKind as SymKind) ? (r.symKind as SymKind) : 'vertical',
@@ -188,17 +196,24 @@ export function familyDirs(g: GuideState): Pt[] {
 }
 
 /** Snap a point's offset perpendicular to `dir` onto the nearest grid line (spacing `size`, lines through the doc origin). */
-export function snapToFamily(p: Pt, dir: Pt, size: number): Pt {
+export function snapToFamily(p: Pt, dir: Pt, size: number, origin: Pt = { x: 0, y: 0 }): Pt {
   const n = { x: -dir.y, y: dir.x }
-  const off = p.x * n.x + p.y * n.y
+  const o0 = origin.x * n.x + origin.y * n.y
+  const off = p.x * n.x + p.y * n.y - o0
   const snapped = Math.round(off / size) * size
   return { x: p.x + n.x * (snapped - off), y: p.y + n.y * (snapped - off) }
+}
+
+/** Where a new symmetry centre / vanishing point goes on an infinite canvas: the frame centre when there is a frame, else the view centre. */
+export function infiniteAnchor(box: { x: number; y: number; w: number; h: number }): { centre: Pt; vp: Pt } {
+  const centre = { x: Math.round(box.x + box.w / 2), y: Math.round(box.y + box.h / 2) }
+  return { centre, vp: { x: centre.x, y: Math.round(box.y + box.h * 0.4) } }
 }
 
 /** Lines a stroke starting at `start` may be locked to. Empty for symmetry (no line lock). */
 export function assistCandidates(g: GuideState, start: Pt): AssistLine[] {
   if (g.type === 'grid' || g.type === 'iso') {
-    return familyDirs(g).map((dir) => ({ dir, origin: snapToFamily(start, dir, g.gridSize) }))
+    return familyDirs(g).map((dir) => ({ dir, origin: snapToFamily(start, dir, g.gridSize, g.gridOrigin) }))
   }
   if (g.type === 'perspective') {
     const out: AssistLine[] = []
@@ -246,15 +261,22 @@ const nearMultiple = (deg: number, step: number): boolean => {
  * Axis-aligned lines (document px) that the Transform tool can snap to: grid lines, the symmetry axes and
  * vanishing-point coordinates. Empty when the guide is off. Lines are capped so a tiny grid stays cheap.
  */
-export function snapTargetsFor(g: GuideState, w: number, h: number): { x: number[]; y: number[] } {
+export function snapTargetsFor(g: GuideState, w: number, h: number, box?: { x: number; y: number; w: number; h: number }): { x: number[]; y: number[] } {
   const out = { x: [] as number[], y: [] as number[] }
   if (!g.enabled) return out
   if (g.type === 'grid') {
     if (!nearMultiple(g.gridRotation, 90)) return out
     let step = Math.max(4, g.gridSize)
-    while (w / step > 160 || h / step > 160) step *= 2
-    for (let x = step; x < w; x += step) out.x.push(x)
-    for (let y = step; y < h; y += step) out.y.push(y)
+    const b = box ?? { x: 0, y: 0, w, h }
+    while (b.w / step > 160 || b.h / step > 160) step *= 2
+    if (box) {
+      // infinite canvas: grid lines through gridOrigin inside the given (visible) box
+      for (let x = g.gridOrigin.x + Math.ceil((b.x - g.gridOrigin.x) / step) * step; x < b.x + b.w; x += step) out.x.push(x)
+      for (let y = g.gridOrigin.y + Math.ceil((b.y - g.gridOrigin.y) / step) * step; y < b.y + b.h; y += step) out.y.push(y)
+    } else {
+      for (let x = step; x < w; x += step) out.x.push(x)
+      for (let y = step; y < h; y += step) out.y.push(y)
+    }
   } else if (g.type === 'symmetry') {
     const a = g.symAngle
     const vertical = nearMultiple(a, 180)

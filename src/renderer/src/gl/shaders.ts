@@ -140,12 +140,14 @@ in vec2 vUv;
 out vec4 o;
 ${STROKE_CHUNK}
 uniform float uDither; // 1 when the target layer is 8-bit: dither the baked stroke so soft gradients do not band
+uniform vec2 uOrigin;  // doc-space origin of the target tile (0 on fixed documents): the dither pattern is global
 void main(){
   vec4 src = texture(uSrc, vUv);
   o = applyStroke(src, vUv);
   if (uDither > 0.5 && o.a > 0.0 && o.a < 0.995 && any(notEqual(o, src))) {
-    float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5;
-    n += fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+    vec2 fc = gl_FragCoord.xy + uOrigin;
+    float n = fract(52.9829189 * fract(dot(fc, vec2(0.06711056, 0.00583715)))) - 0.5;
+    n += fract(sin(dot(fc, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
     o += o / o.a * (n / 255.0);
     o = clamp(o, 0.0, 1.0);
   }

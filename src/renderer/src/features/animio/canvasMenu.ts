@@ -8,6 +8,7 @@ import { registerMenuItem } from '../../ui/registry'
 import type { UIContext } from '../../ui/registry'
 import { animState } from './animation'
 import { docMeta, profileListeners, setDocMeta } from './docMeta'
+import { convertToFixedDialog, convertToInfinite, flipInfinite } from '../infinite/convert'
 import { openProfileDialog } from '../profiles/dialog'
 import { formatDuration } from './schedule'
 import { getRecorder } from './timelapse'
@@ -21,6 +22,7 @@ const full = (d: Document): { x: number; y: number; w: number; h: number } => ({
  * modules, so this flips the pixels of every layer and mask instead (one undo step).
  */
 export function flipCanvas(app: App, axis: 'h' | 'v'): void {
+  if (app.doc.isInfinite) return flipInfinite(app, axis)
   const doc = app.doc
   const gpu = app.gpu
   const f = full(doc)
@@ -260,6 +262,18 @@ function migrateAnimState(from: Document, to: Document): void {
 }
 
 // ------------------------------------------------------------------ canvas information
+/** Canvas Information rows of an infinite document: type, painted area, tile count + GPU memory. */
+function infiniteRows(doc: App['doc'], stat: (k: string, v: string) => HTMLElement): HTMLElement[] {
+  const b = doc.contentBounds({ tight: true })
+  const s = doc.tileStats()
+  return [
+    stat(t('animio.info.kind'), t('animio.info.kindInfinite')),
+    stat(t('animio.info.content'), b ? t('animio.info.contentValue', { w: Math.round(b.w), h: Math.round(b.h), x: Math.round(b.x), y: Math.round(b.y) }) : t('animio.info.contentNone')),
+    stat(t('animio.info.tiles'), t('animio.info.tilesValue', { n: s.tiles, mb: Math.round(s.bytes / 1048576) })),
+    stat(t('animio.info.tiers'), t('animio.info.tiersValue', { gpu: s.gpu, cpu: s.cpu, disk: s.disk, cmb: Math.round(s.cpuBytes / 1048576), dmb: Math.round(s.diskBytes / 1048576) }))
+  ]
+}
+
 function infoDialog(app: App, ui: UIContext): void {
   const doc = app.doc
   const meta = docMeta(doc)
@@ -270,8 +284,9 @@ function infoDialog(app: App, ui: UIContext): void {
   const paint = (): void => {
     body.replaceChildren(
       h('div', { class: 'an-h', text: t('animio.info.dimensions') }),
+      ...(doc.isInfinite ? infiniteRows(doc, stat) : [
       stat(t('core.common.size'), t('animio.info.sizeValue', { w: doc.width, h: doc.height })),
-      stat(t('animio.info.physical'), t('animio.info.physicalValue', { w: fx(doc.width / meta.dpi, 2), h: fx(doc.height / meta.dpi, 2), dpi: meta.dpi })),
+      stat(t('animio.info.physical'), t('animio.info.physicalValue', { w: fx(doc.width / meta.dpi, 2), h: fx(doc.height / meta.dpi, 2), dpi: meta.dpi }))]),
       stat(t('animio.info.layers'), t('animio.info.layersValue', { used: doc.paintLayerCount, max: doc.maxLayers, groups: doc.layers.length - doc.paintLayerCount })),
       stat(t('animio.info.profile'), meta.profile),
       stat(t('animio.info.pixelFormat'), doc.format === 'rgba16f' ? t('animio.info.format16') : t('animio.info.format8')),
@@ -316,7 +331,8 @@ function infoDialog(app: App, ui: UIContext): void {
 
 export function installCanvasMenu(app: App, ui: UIContext): void {
   const A = (id: string, label: I18nRef, run: () => void, separator = false): void => registerMenuItem('actions', { id, label, group: 'canvas', separator, run })
-  A('canvas-crop', tk('animio.menu.crop'), () => cropDialog(app, ui), true)
+  registerMenuItem('actions', { id: 'canvas-crop', label: () => (app.doc.isInfinite ? t('ui.inf.menu.toFixed') : t('animio.menu.crop')), group: 'canvas', separator: true, run: () => (app.doc.isInfinite ? convertToFixedDialog(app) : cropDialog(app, ui)) })
+  registerMenuItem('actions', { id: 'canvas-to-infinite', label: tk('ui.inf.menu.toInfinite'), group: 'canvas', run: () => (app.doc.isInfinite ? app.notify(t('ui.inf.toInfinite.done').split(';')[0]) : void convertToInfinite(app)) })
   A('canvas-mirror', tk('animio.menu.mirror'), () => app.toggleMirror(), true)
   A('canvas-flip-h', tk('animio.menu.flipH'), () => flipCanvas(app, 'h'))
   A('canvas-flip-v', tk('animio.menu.flipV'), () => flipCanvas(app, 'v'))

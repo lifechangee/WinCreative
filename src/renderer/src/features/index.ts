@@ -4,14 +4,18 @@ import * as layers from './layers'
 import * as color from './color'
 import * as adjustments from './adjustments'
 import * as selectxform from './selectxform'
+import * as smartselect from './smartselect'
 import * as guides from './guides'
 import * as animio from './animio'
 import * as interfaceFeat from './interface'
 import * as profiles from './profiles'
 import * as psdimport from './psdimport'
 import * as tutorial from './tutorial'
+import * as infinite from './infinite'
+import * as frame from './frame'
+import * as langvariants from './langvariants'
 
-const modules = { brushes, layers, color, adjustments, selectxform, guides, animio, profiles, psdimport, interface: interfaceFeat, tutorial }
+const modules = { brushes, layers, color, adjustments, selectxform, smartselect, guides, animio, profiles, psdimport, interface: interfaceFeat, tutorial, infinite, frame, langvariants }
 
 export function installFeatures(app: App, ui: unknown): void {
   for (const [name, m] of Object.entries(modules)) {

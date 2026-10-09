@@ -2,7 +2,7 @@ import type { App } from '../../app/app'
 import { I18nText, tk } from '../../i18n'
 import { h } from '../../ui/dom'
 import type { GuideManager } from './guideManager'
-import { GuideType } from './model'
+import { GuideType, infiniteAnchor } from './model'
 import { floatPanel, FloatPanel, segRow, sliderRow, toggleRow } from './widgets'
 
 /** The Drawing Guide editor: type, options, per-layer Drawing Assist. Non-modal so guide handles stay draggable. */
@@ -42,6 +42,15 @@ export function buildGuidePanel(app: App, mgr: GuideManager): FloatPanel {
   const secPersp = h('div')
   const secSym = h('div')
   add(sliderRow(tk('guides.panel.rotation'), -90, 90, 1, () => g().gridRotation, (v) => mgr.set({ gridRotation: v }), (v) => Math.round(v) + '°'), secGrid)
+  const originBtn = (): HTMLElement =>
+    h('button', {
+      class: 'bwf-btn infonly',
+      text: tk('guides.panel.gridOriginHere'),
+      title: tk('guides.panel.gridOriginTip'),
+      onclick: () => mgr.set({ gridOrigin: infiniteAnchor(mgr.anchorBox()).centre })
+    })
+  secGrid.append(originBtn())
+  secIso.append(originBtn())
   secIso.append(h('div', { class: 'bwf-sec', text: tk('guides.panel.plane') }))
   add(
     segRow(
@@ -94,7 +103,10 @@ export function buildGuidePanel(app: App, mgr: GuideManager): FloatPanel {
     h('button', {
       class: 'bwf-btn',
       text: tk('guides.panel.resetAxis'),
-      onclick: () => mgr.set({ symAngle: 0, symCenter: { x: app.doc.width / 2, y: app.doc.height / 2 } })
+      onclick: () => {
+        const b = app.doc.isInfinite ? infiniteAnchor(mgr.anchorBox()).centre : { x: app.doc.width / 2, y: app.doc.height / 2 }
+        mgr.set({ symAngle: 0, symCenter: b })
+      }
     })
   )
   panel.body.append(secGrid, secIso, secPersp, secSym)
@@ -125,6 +137,7 @@ export function buildGuidePanel(app: App, mgr: GuideManager): FloatPanel {
 
   const sync = (): void => {
     const t = g().type
+    panel.body.querySelectorAll<HTMLElement>('.infonly').forEach((b) => (b.style.display = app.doc.isInfinite ? '' : 'none'))
     secGrid.style.display = t === 'grid' ? '' : 'none'
     secIso.style.display = t === 'iso' ? '' : 'none'
     secPersp.style.display = t === 'perspective' ? '' : 'none'

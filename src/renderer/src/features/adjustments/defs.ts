@@ -20,6 +20,7 @@ export const blurSigma = (v: number, md: number): number => (v / 100) * 0.05 * m
 // ------------------------------------------------------------------------------------------ colour
 const hsb: AdjDef = {
   id: 'hsb',
+  local: true,
   name: 'Hue, Saturation, Brightness',
   params: [pct('hue', 'Hue', 50), pct('sat', 'Saturation', 50), pct('bri', 'Brightness', 50)],
   main: 'hue',
@@ -40,6 +41,7 @@ const hsb: AdjDef = {
 const isR = (n: number) => (p: Params) => p.range === n
 const colorBalance: AdjDef = {
   id: 'colorBalance',
+  local: true,
   name: 'Color Balance',
   params: [
     sel('range', 'Range', ['Shadows', 'Midtones', 'Highlights'], 1),
@@ -72,6 +74,7 @@ const colorBalance: AdjDef = {
 
 const curves: AdjDef = {
   id: 'curves',
+  local: true,
   name: 'Curves',
   params: [],
   custom: 'curves',
@@ -90,6 +93,7 @@ const curves: AdjDef = {
 
 const gradientMap: AdjDef = {
   id: 'gradientMap',
+  local: true,
   name: 'Gradient Map',
   params: [pct('amount', 'Intensity', 100)],
   main: 'amount',
@@ -109,6 +113,7 @@ const gradientMap: AdjDef = {
 
 const recolor: AdjDef = {
   id: 'recolor',
+  local: true,
   name: 'Recolor',
   params: [pct('amount', 'Intensity', 100), colorParam('color', 'Color', 0xe8412c)],
   main: 'amount',
@@ -130,6 +135,7 @@ const recolor: AdjDef = {
 // ------------------------------------------------------------------------------------------ blurs
 const gaussian: AdjDef = {
   id: 'gaussian',
+  pad: 0.16,
   name: 'Gaussian Blur',
   params: [pct('radius', 'Radius', 20)],
   main: 'radius',
@@ -146,6 +152,7 @@ const MOTION_BODY = `uniform vec2 uDir; uniform float uN; uniform float uBack;
 
 const motion: AdjDef = {
   id: 'motion',
+  pad: 0.07,
   name: 'Motion Blur',
   params: [pct('amount', 'Amount', 30), angle('angle', 'Direction', 0), tog('back', 'Backward only', 0)],
   main: 'amount',
@@ -215,6 +222,7 @@ const noise: AdjDef = {
 
 const sharpen: AdjDef = {
   id: 'sharpen',
+  pad: 0.03,
   name: 'Sharpen',
   params: [pct('amount', 'Amount', 40), pct('radius', 'Radius', 15)],
   main: 'amount',
@@ -234,6 +242,7 @@ const sharpen: AdjDef = {
 
 const bloom: AdjDef = {
   id: 'bloom',
+  pad: 0.2,
   name: 'Bloom',
   params: [pct('transition', 'Transition', 50), pct('size', 'Size', 30), pct('opacity', 'Opacity', 60), pct('burn', 'Burn', 20)],
   main: 'opacity',

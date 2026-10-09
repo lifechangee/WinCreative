@@ -40,6 +40,9 @@ precision highp float;
 uniform int uMode;            // 0 stamp into stroke buffer, 1 smudge into layer, 2 wet mix into layer
 uniform float uHardness;
 uniform vec2 uCanvas;
+uniform vec2 uOrigin;         // doc-space origin of the render target (0 on fixed documents); dab coordinates are target-relative
+uniform vec2 uSrcOff;         // uSrc texel = target-relative position + uSrcOff (0 on fixed documents)
+uniform vec2 uSrcSize;        // size of the uSrc texture
 uniform int uHasTip;
 uniform int uTipInvert;
 uniform sampler2D uTip;
@@ -99,7 +102,7 @@ void main(){
   float a = b * vAlpha;
   if (uHasGrain == 1 && vD.x > 0.0) {
     float sc = max(uGrainP.x, 0.02);
-    vec2 pos = vWorld - vCenter * uGrainP.y * uGrainP.z + vD.yz;
+    vec2 pos = (vWorld + uOrigin) - (vCenter + uOrigin) * uGrainP.y * uGrainP.z + vD.yz;
     vec2 uv;
     if (uGrainQ.y > 0.5) uv = pos / (2.0 * vRad * sc * max(vE.z, 0.01)) + 0.5;
     else uv = pos / (sc * uGrainP.w);
@@ -123,17 +126,17 @@ void main(){
   a = clamp(a, 0.0, 1.0);
   if (uMode == 0) { o = vec4(vColor * a, a); return; }
   a *= selCov(vWorld / uCanvas);
-  vec4 here = texelFetch(uSrc, ivec2(gl_FragCoord.xy), 0);
+  vec4 here = texelFetch(uSrc, ivec2(gl_FragCoord.xy + uSrcOff), 0);
   vec4 res;
   if (uMode == 1) {
-    vec4 s = texture(uSrc, (vWorld + vDelta) / uCanvas);
+    vec4 s = texture(uSrc, (vWorld + vDelta + uSrcOff) / uSrcSize);
     float k = clamp(a * uMix.x, 0.0, 1.0);
     if (vE.y > 0.0) {
       float r = vRad * 0.35 * vE.y + 0.5;
       vec4 acc = vec4(0.0);
       for (int i = 0; i < 4; i++) {
         float an = 1.5708 * float(i);
-        acc += texture(uSrc, (vWorld + vDelta + vec2(cos(an), sin(an)) * r) / uCanvas);
+        acc += texture(uSrc, (vWorld + vDelta + vec2(cos(an), sin(an)) * r + uSrcOff) / uSrcSize);
       }
       s = mix(s, (s + acc) / 5.0 * 1.25, min(1.0, vE.y));
     }
@@ -142,7 +145,7 @@ void main(){
     vec4 L = texelFetch(uLoad, ivec2(0), 0);
     float dil = vE.x;
     float k = a * uMix.x * (1.0 - 0.6 * dil);
-    if (uMix.y > 0.0) k *= mix(1.0, 0.25 + 1.5 * vnoise(vWorld * 0.7), uMix.y);
+    if (uMix.y > 0.0) k *= mix(1.0, 0.25 + 1.5 * vnoise((vWorld + uOrigin) * 0.7), uMix.y);
     k = clamp(k, 0.0, 1.0);
     vec4 base = here;
     if (vE.y > 0.0) {
@@ -150,7 +153,7 @@ void main(){
       vec4 acc = here;
       for (int i = 0; i < 6; i++) {
         float an = 1.0472 * float(i);
-        acc += texture(uSrc, (vWorld + vec2(cos(an), sin(an)) * r) / uCanvas);
+        acc += texture(uSrc, (vWorld + vec2(cos(an), sin(an)) * r + uSrcOff) / uSrcSize);
       }
       base = mix(here, acc / 7.0, clamp(a * 2.0 * vE.y, 0.0, 1.0));
     }
@@ -168,7 +171,8 @@ export const LOAD_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uSrc;
 uniform sampler2D uLoad;
-uniform vec2 uCanvas;
+uniform vec2 uCanvas;   // size of uSrc
+uniform vec2 uSrcOrg;   // doc-space position of uSrc texel (0,0) (0 on fixed documents)
 uniform vec3 uPos;      // x, y, radius
 uniform vec4 uBrush;    // premultiplied brush colour, a = 1
 uniform vec2 uRates;    // pull, refill
@@ -177,7 +181,7 @@ void main(){
   vec4 acc = vec4(0.0);
   for (int j = 0; j < 5; j++) for (int i = 0; i < 5; i++) {
     vec2 off = (vec2(float(i), float(j)) - 2.0) * 0.5 * uPos.z * 0.8;
-    acc += texture(uSrc, (uPos.xy + off) / uCanvas);
+    acc += texture(uSrc, (uPos.xy + off - uSrcOrg) / uCanvas);
   }
   acc /= 25.0;
   vec4 L = texelFetch(uLoad, ivec2(0), 0);

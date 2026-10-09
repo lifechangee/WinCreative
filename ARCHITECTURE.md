@@ -123,3 +123,53 @@ leaves it; painting keys are swallowed while it is open). The recording is never
   (`outputPlan` = constant-fps run-length list fed to ffmpeg image2pipe, so pauses are repeated frames; fade filters in `main/animio.ts`).
 - Frames are decoded lazily from the on-disk store (LRU of bitmaps + thumbnails), the timeline canvas only draws the visible part.
 - QA: `node scripts/qa/qa-tl.mjs out-tl [en|ru]`, `scripts/qa/qa-tl-perf.mjs`; self-test block `tle:` in the animio suite (`selftestTl.ts`).
+
+## Smart selection (features/smartselect/*, main/smartselect.ts, preload/smartselect.ts)
+`app.selection` gets objects from three engines behind one tool + bar (`smart.ts` controller/tool, `bar.ts` UI, `cutout.ts` actions):
+- **AI** (`ortWorker.ts`, onnxruntime-web, MIT): MobileSAM (bundled in `resources/models/fast`) or SAM 2.1 Hiera-Small (optional download into
+  `userData/models/precise`). The encoder runs once per region (cached by source key = layer/visible-stack `Surface.rev` + region), on WebGPU when available
+  (WASM, 4 threads otherwise); the decoder runs per click (WebGPU for MobileSAM, WASM for SAM 2 because its WebGPU decoder returns garbage; the worker also
+  self-checks the warm-up decode and re-places the decoder on the CPU if a GPU gives nonsense). Models/weights are read by the main process (`ss:read`, size +
+  SHA-256 verified) and transferred to the Worker; nothing is fetched by the renderer (CSP only gains `'wasm-unsafe-eval'`). The runtime (`ort/*.jsep.{mjs,wasm}`) is
+  emitted next to the renderer by a Vite plugin (`electron.vite.config.ts`). Idle: workers are terminated after `idleMinutes` (default 5) or when the tool closes.
+- **Brush** (`brushSeg.ts`): geodesic two-class labelling on a <= 720 px working image (edge cost + colour histograms, GrabCut-style re-estimation, morphological clean-up).
+- **Edge refinement** (`refine.ts`, `imgops.ts`, in `computeWorker.ts`): coarse signed field (decoder logits / brush) -> bilinear to document pixels -> signed-distance ramp
+  -> colour guided filter (He et al.) in a narrow band -> crisp-but-anti-aliased alpha -> Smooth / Shift edge (EDT) / Feather; Decontaminate = normalised colour propagation.
+- **Pixels in / out**: only `source.ts` (`getSourceImage(rect, sample)`, `sourceInfo`) reads pixels, in document-space rects (point it at the tiled-canvas region API later).
+- **Main process**: `ss:status|read|download|cancel|delete`; downloads use pinned URLs of `models.json` (commit-pinned Hugging Face files), `hostAllowed()` on every redirect hop,
+  `.part` files, size + SHA-256 before the file is renamed, a `verified.json` marker. `--enable-blink-features=SharedArrayBuffer` gives the WASM fallback threads.
+- Tests: `tests/smartselect.test.ts` (pure maths, prompts, regions, manifest), self-test `BW_SS_TEST=1` (`node scripts/selftest.mjs --out <dir> smartselect`), QA `scripts/qa/qa-smartselect.mjs`.
+
+## Infinite canvas (docs/INFINITE_CANVAS.md)
+`doc.kind === 'infinite'`: layer pixels live in a sparse `TileStore` (512 px RGBA8 tiles, `core/tiles.ts` = pure math), painted by the same brush shaders
+tile by tile (`gl/brushEngine.ts` `*Inf` paths, `gl/strokeTiles.ts`), shown by the pyramid compositor `gl/infCompositor.ts`, undone through per-tile
+snapshots (`doc/pixelEdit.ts`), saved as `.bwk` v2 (`io/bwkInfinite.ts`). Legacy full-texture tools use `doc.readRegion / writeRegion / withRegion`; features that are
+not migrated are refused through `doc/infiniteGuard.ts` (menu gate in `ui/registry.ts`). Self-test: `node scripts/selftest.mjs --out <build> infinite`.
+
+## Frame (`features/frame/`)
+`model.ts` (pure: presets, rect math, letterbox), `state.ts` (per-document frame in a WeakMap, undoable `editFrame`/`commitFrame`, syncs `clipMask.frame`),
+`workRect.ts` (`workRect(app)`, `frameRect(doc)`, `frameEnabled(doc)`), `index.ts` (overlay dim/outline/handles, toggle button, panel, actions, `.bwk` extension),
+`exportArea.ts` (export area used by `io/exporters.ts` + `io/frameRender.ts`), `tlCapture.ts` (time-lapse capture of the frame / visible viewport into the recording's
+stable `out` size, see `TimelapseRecorder.out`). GPU: `CLIP_CHUNK` has `frameCov(uv)` multiplied into `selCov`; passes whose uv is not the whole canvas give their
+document region to `bindClipMask(gpu, prog, region)`.
+
+## Language variants (0.4.0, docs/LANGUAGE_VARIANTS.md)
+`features/langvariants/` (`model.ts` pure: language list, commit classification, frame planning, tags; `ops.ts` language-layer operations; `ui.ts` switcher + dialogs; `index.ts` install / persistence / actions).
+A language layer is a group flagged `langSet` whose children are paint layers tagged `lang` (LayerProps `langSet` / `lang`); the panel shows it as ONE row. `Document`: `langs`, `viewLang`, `langGhost`,
+`activeLayer` resolves a language row to its cell, `writableActive()` creates the cell on the first write, `editLangs`. `gl/compositor.ts`: `StackRenderer.lang` (render as a language; other languages' cells are skipped in `buildOps`),
+`Compositor.renderLang / langInf / readFlattened(..., lang)` give a private renderer, tile compositor and surface per language (recordings, exports). The recorder (`animio/timelapse.ts`) classifies commits (`CommitEvent.layerIds`),
+plans one frame per affected variant (`planFrames`), requests every composite in one task and tags frames `{v: variants, g: capture group}` in the frame index. `animio/tlVariants.ts` (pure): per-variant schedule input, per-variant edit sets
+(edit model version 2), copy edits, thinning, compare-view sync (`panesAt`). `tlCompare.ts` is the compare view.
+
+## Release plumbing (0.3.0)
+- **Bundled model.** `resources/models/fast` (MobileSAM, ~45 MB) is not in git. `npm run models` (`scripts/models/fetch-bundled.mjs`, SHA-256 verified, skipped when present,
+  `--check` = verify only) runs automatically before `npm run dist` (`predist`) and before the `smartselect` self-test. `npm run build`, `tsc` and `vitest` never need it (the integrity test
+  skips when the files are absent), so CI on a clean checkout downloads nothing.
+- **Verified saves.** The gallery writes `.bwk` files through `gallery:write` / `gallery:wend` (`main/gallery.ts`): the temp file is re-opened (`main/zipVerify.ts`: central directory,
+  every entry inflated, CRC-32 + size compared, on the libuv pool) *before* it replaces the artwork; the previous version is kept as `<id>.bwk~` (hard link) and `GalleryStore.open`
+  falls back to it when the current file cannot be read.
+- **OS clipboard.** Electron 44's main-process clipboard is the async `ClipboardItem` API (`main/layersIpc.ts`); `features/layers/clipboard.ts` `writeClipboardPng` is the single writer
+  (layer copy / copy canvas / smart selection "Copy object"), foreign bitmaps are read as `image/png`.
+- **Single instance.** A redundant second launch (`PRIMARY` in `main/index.ts`) only forwards its arguments: it must not wipe `userData/scratch` of the running instance.
+- **Packaged QA.** `node scripts/selftest.mjs --exe <WinCreative.exe>` runs every suite against an unpacked build; `BW_EXE=<exe> node scripts/qa/qa-int-pkg.mjs` (scratch lifecycle, kill -9,
+  second launch, foreign clipboard), `qa-int-compat.mjs` (v0.1.0 / v0.2.0 fixtures in `tests/fixtures`), `qa-int-stress.mjs` (cross-feature infinite-canvas session), `qa-int-hitch.mjs`.

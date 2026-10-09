@@ -31,6 +31,9 @@ function injectCss(): void {
   document.head.append(s)
 }
 
+/** Extra tool buttons next to the selection shapes (other feature modules, e.g. Smart selection, register here). */
+export const barExtras: { id: string; label: () => string; tip: () => string; run: () => void }[] = []
+
 export interface BarDeps {
   app: App
   sel: SelectionTool
@@ -97,6 +100,7 @@ export class Bar {
     const r1 = h('div', { class: 'sx-row' })
     const shapes: [SelShape, string][] = [['auto', t('selectxform.bar.automatic')], ['free', t('selectxform.bar.freehand')], ['rect', t('selectxform.bar.rectangle')], ['ellipse', t('selectxform.bar.ellipse')]]
     for (const [s, l] of shapes) r1.append(this.btn(l, selSettings.shape === s, () => this.d.setShape(s)))
+    for (const x of barExtras) r1.append(this.btn(x.label(), false, x.run, x.tip()))
     r1.append(this.sep())
     r1.append(
       this.btn(t('selectxform.bar.add'), selSettings.mode === 'add', () => {
@@ -173,7 +177,8 @@ export class Bar {
   private featherRow(): HTMLElement {
     const row = h('div', { class: 'sx-row' })
     const app = this.d.app
-    const maxDim = Math.max(app.doc.width, app.doc.height)
+    const sb = app.doc.isInfinite ? app.selection.bounds() : null
+    const maxDim = sb ? Math.max(sb.w, sb.h, 256) : Math.max(app.doc.width, app.doc.height)
     row.append(
       this.range(t('selectxform.bar.featherRange'), 0, 100, 1, this.feather?.pct ?? 0, (v) => {
         if (!this.feather) return

@@ -1,6 +1,7 @@
 import type { App } from '../app/app'
 import { Emitter } from '../core/events'
 import { I18nText, has, inLang, resolveText, t } from '../i18n'
+import { ACTIONS_BLOCKED, notAvailable } from '../doc/infiniteGuard'
 import { menus, MenuId, menuGroupLabel, menuItemParts } from '../ui/registry'
 import type { UIContext } from '../ui/registry'
 
@@ -39,6 +40,8 @@ export const actionEvents = new Emitter<{ run: { id: string } }>()
  * gestures. Other modules may call this at any time (later registrations replace by id).
  */
 export function registerAction(def: ActionDef): void {
+  const run = def.run
+  if (run && ACTIONS_BLOCKED.has(def.id)) def = { ...def, run: (env) => (env.app.doc.isInfinite ? notAvailable() : run.call(def, env)) }
   registry.set(def.id, def)
 }
 

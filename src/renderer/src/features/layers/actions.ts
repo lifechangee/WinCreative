@@ -7,6 +7,7 @@ import { encodePsd } from '../../io/psd'
 import { t } from '../../i18n'
 import * as clip from './clipboard'
 import * as ops from './ops'
+import { clearCell } from '../langvariants/ops'
 
 /** All user-facing layer commands in one place (panel, menus, shortcuts and gestures call these). */
 export class LayerActions {
@@ -48,6 +49,7 @@ export class LayerActions {
   clear = (id?: string): void => {
     const l = this.target(id)
     if (l?.locked) return this.toast(t('layers.toast.layerLocked'))
+    if (l?.langSet) return clearCell(this.doc, l.id, this.doc.viewLang) // a language layer: the cell of the view language
     if (l?.isGroup) return
     if (l) this.doc.clearLayer(l.id)
   }
@@ -68,10 +70,16 @@ export class LayerActions {
   mergeSelected = (): void => this.run(() => this.msg(ops.mergeLayers(this.doc, this.doc.selectedLayerIds())))
   mergeGroup = (id?: string): void => this.run(() => this.msg(ops.mergeGroup(this.doc, id ?? this.doc.activeId)))
   flatten = (): void => this.run(() => this.msg(ops.flattenAll(this.doc)))
+  /** flatten everything into the VIEW language (the other languages' writing is discarded; undoable) */
+  flattenCurrentLanguage = (): void => this.run(() => this.msg(ops.flattenAll(this.doc, true)))
+  /** flatten one language layer into a plain layer of the view language */
+  flattenLangRow = (id: string): void => this.run(() => this.msg(ops.mergeGroup(this.doc, id, true)))
   /** merge = smart: multi-selection merges the selection, group merges the group, otherwise merge down */
   mergeSmart = (): void => {
     const l = this.doc.activeLayer
+    const row = this.doc.getLayer(this.doc.activeId)
     if (this.doc.selectedLayerIds().length > 1) this.mergeSelected()
+    else if (row?.langSet) this.run(() => this.msg(ops.mergeLangDown(this.doc, row.id)))
     else if (l?.isGroup) this.mergeGroup(l.id)
     else this.mergeDown()
   }
@@ -80,6 +88,14 @@ export class LayerActions {
     const l = this.target(id)
     if (!l) return
     if (key === 'clipping' && l.isGroup) return
+    if (l.langSet && (key === 'locked' || key === 'alphaLock')) {
+      // the whole row: the group and every cell, one undo step
+      const v = !l[key]
+      this.doc.transaction('Layer properties', 'layer-props', l.id, () => {
+        for (const x of [l, ...this.doc.cellsOf(l.id)]) this.doc.setLayerProps(x.id, { [key]: v } as Partial<LayerProps>)
+      })
+      return
+    }
     this.doc.setLayerProps(l.id, { [key]: !l[key] } as Partial<LayerProps>)
   }
   setReference = (id?: string): void => {

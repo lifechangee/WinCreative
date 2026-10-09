@@ -9,11 +9,11 @@ import { installPagesUi } from './pages'
 import { installShareMenu } from './shareUi'
 import { getRecorder, installTimelapse } from './timelapse'
 import { installTimelapseUi } from './tlUi'
-import { closeTimelapseEditor, installTimelapseEditor, openTimelapseEditor } from './tlEditor'
-import { exportTimelapse, resolveRecorder } from './tlExport'
+import { closeTimelapseEditor, installTimelapseEditor, openTimelapseEditor, timelapseEditor } from './tlEditor'
+import { exportAllVariants, exportTimelapse, resolveRecorder } from './tlExport'
 import { encodeDocument, openAnyFile } from './shareUi'
 import { galleryRef } from '../color/galleryRef'
-import { saveBwk, loadBwk } from '../../io/bwk'
+import { saveBwk, saveBwkEx, loadBwk } from '../../io/bwk'
 
 /** Feature module 'animio' — installed once at startup after buildUI(). */
 export function install(app: App, uiArg: unknown): void {
@@ -33,9 +33,9 @@ export function install(app: App, uiArg: unknown): void {
     if (rec && (q === 'max' || q === 'hd' || q === 'small')) rec.setQuality(q)
     setDocMeta(doc, { ...(o.dpi ? { dpi: o.dpi } : {}), ...(o.profile ? { profile: o.profile } : {}) })
   }
-  ;(window as any).brushwork_animio = { tl, anim, pages, applyCanvasOptions, tle: { open: (o?: { exportNow?: boolean }) => openTimelapseEditor(app, ui, o), close: closeTimelapseEditor, resolve: resolveRecorder, export: exportTimelapse } }
+  ;(window as any).brushwork_animio = { tl, anim, pages, applyCanvasOptions, tle: { editor: timelapseEditor, open: (o?: { exportNow?: boolean }) => openTimelapseEditor(app, ui, o), close: closeTimelapseEditor, resolve: resolveRecorder, export: exportTimelapse, exportAll: exportAllVariants } }
   // debug / QA handle (headless verification of the packaged app)
-  ;(window as any).brushwork_io = { encodeDocument: (fmt: any, o: any) => encodeDocument(app, fmt, o), openAnyFile: (b: Uint8Array, n: string) => openAnyFile(app, b, n), saveBwk: () => saveBwk(app.doc, app.compositor), loadBwk: (b: Uint8Array) => loadBwk(b, app.gpu), gallery: () => galleryRef.store }
+  ;(window as any).brushwork_io = { encodeDocument: (fmt: any, o: any) => encodeDocument(app, fmt, o), openAnyFile: (b: Uint8Array, n: string) => openAnyFile(app, b, n), saveBwk: () => saveBwk(app.doc, app.compositor), saveBwkEx: () => saveBwkEx(app.doc, app.compositor), loadBwk: (b: Uint8Array) => loadBwk(b, app.gpu), gallery: () => galleryRef.store }
   // files handed over by the OS: double-click / "Open with" .bwk, second launch (see main/index.ts)
   const openExternal = async (f: { path: string; data: Uint8Array }): Promise<void> => {
     try {

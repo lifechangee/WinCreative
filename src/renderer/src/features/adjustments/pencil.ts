@@ -17,11 +17,10 @@ export class MaskPencil implements PencilTool {
   private host: ToolHost
 
   constructor(private c: ToolCtx) {
-    const doc = c.app.doc
-    this.engine = new MaskEngine(c.app.gpu, c.fx, doc.width, doc.height)
+    this.engine = new MaskEngine(c.app.gpu, c.fx, c.orig.w, c.orig.h)
     this.engine.onDirty = (r) => c.combine(r)
     this.host = {
-      doc: { activeLayer: c.layer, emitCommit: () => {} },
+      doc: { activeLayer: c.layer, writableActive: () => c.layer, emitCommit: () => {} },
       engine: this.engine,
       state: c.app.state,
       requestRender: () => c.app.requestRender(),

@@ -9,5 +9,6 @@ export const TLE_SHORTCUTS: { label: string; keys: string[] }[] = [
   { label: 'animio.tle.cheat.split', keys: ['S'] },
   { label: 'animio.tle.cheat.delete', keys: ['Delete'] },
   { label: 'animio.tle.cheat.undo', keys: ['Ctrl+Z', 'Ctrl+Shift+Z'] },
-  { label: 'animio.tle.cheat.back', keys: ['Esc'] }
+  { label: 'animio.tle.cheat.back', keys: ['Esc'] },
+  { label: 'langs.cheat.compare', keys: ['Space', '←', '→', 'Esc'] }
 ]

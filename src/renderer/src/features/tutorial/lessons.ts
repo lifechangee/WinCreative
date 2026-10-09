@@ -459,6 +459,29 @@ const selxf: LessonDef = {
   ]
 }
 
+const ssBar = (): HTMLElement | null => q('.ss-bar')
+const smartSel = (): any => (window as any).brushwork_smartselect
+const smart: LessonDef = {
+  id: 'smart',
+  icon: 'crosshair',
+  setup: (p) => {
+    // an orange blob on a bluish backdrop: easy for the model, so the lesson works offline with the built-in model
+    p.paint([[0, 500], [1600, 500]], { size: 1100, color: { h: 205, s: 0.35, v: 0.75 } })
+    p.paint([[640, 470], [980, 470], [820, 560]], { size: 230, color: { h: 24, s: 0.9, v: 0.95 } })
+    p.paint([[760, 330], [880, 330]], { size: 150, color: { h: 24, s: 0.9, v: 0.95 } })
+    p.sealHistory()
+  },
+  steps: [
+    { id: 'menu', target: topBtn(3), anim: 'menu:Smart selection,Rectangle,Ellipse,Freehand', watch: (c) => c.poll(() => popId(c) === 'menu-selection') },
+    { id: 'open', anim: 'click', watch: (c) => c.poll(() => !!smartSel()?.c.active) },
+    { id: 'modes', target: () => qa('.ss-modes')[0] ?? null, anim: 'select' },
+    { id: 'click', anim: 'click', watch: (c) => c.poll(() => !!sel(c)?.hasSelection?.() || (smartSel()?.c.pointCount ?? 0) > 0) },
+    { id: 'remove', anim: 'click', params: () => ({ key: 'Alt' }), watch: (c) => c.poll(() => !!smartSel()?.c.session?.points.some((p: { label: number }) => p.label === 0)) },
+    { id: 'edge', target: () => qa('.ss-bar .sx-row')[1] ?? ssBar(), anim: 'slider:opacity' },
+    { id: 'cut', target: () => qa('.ss-bar .sx-row')[2] ?? ssBar(), anim: 'click', watch: (c) => c.on('commit', (e) => e.type === 'layer-paste' && c.pass()) }
+  ]
+}
+
 const adjust: LessonDef = {
   id: 'adjust',
   icon: 'star',
@@ -608,7 +631,51 @@ const gallery: LessonDef = {
   ]
 }
 
-export const LESSONS: LessonDef[] = [basics, pen, penSetup, nav, color, shapes, layers, selxf, adjust, guidesLesson, quick, exportLesson, gallery]
+/** Frame & infinite canvas (features/frame): make a frame, draw across its edge, switch it off. */
+const frameLesson: LessonDef = {
+  id: 'frame',
+  icon: 'crosshair',
+  steps: [
+    { id: 'intro', anim: 'ring' },
+    {
+      id: 'make',
+      target: '.bw-frame-btn',
+      anim: 'ring',
+      watch: (c) => c.poll(() => !!(window as unknown as { brushwork_frame?: { getFrame(): unknown } }).brushwork_frame?.getFrame())
+    },
+    { id: 'draw', anim: 'penDraw', watch: strokes(1) },
+    {
+      id: 'toggle',
+      target: '.bw-frame-btn',
+      anim: 'ring',
+      watch: (c) => c.poll(() => (window as unknown as { brushwork_frame?: { getFrame(): { enabled: boolean } | null } }).brushwork_frame?.getFrame()?.enabled === false)
+    }
+  ]
+}
+
+/** Language variants (features/langvariants): one drawing, one video per language. Every step is detected from the document. */
+const langsLesson: LessonDef = {
+  id: 'langs',
+  icon: 'layers',
+  steps: [
+    { id: 'intro', anim: 'ring' },
+    { id: 'layer', anim: 'ring', target: '.topbar .tb-layers', watch: (c) => c.poll(() => c.app.doc.hasLangLayers) },
+    {
+      id: 'write1',
+      anim: 'penDraw',
+      watch: (c) => c.poll(() => c.app.doc.langSets().some((g) => c.app.doc.cellsOf(g.id).some((x) => c.app.doc.cellHasContent(x))))
+    },
+    { id: 'switch', anim: 'ring', params: () => ({ key: 'Ctrl+Alt+L' }), prepare: (c) => void (c.data.view = c.app.doc.viewLang), watch: (c) => c.poll(() => c.app.doc.viewLang !== c.data.view) },
+    {
+      id: 'write2',
+      anim: 'penDraw',
+      watch: (c) => c.poll(() => c.app.doc.langSets().some((g) => c.app.doc.cellsOf(g.id).filter((x) => c.app.doc.cellHasContent(x)).length >= 2))
+    },
+    { id: 'video', anim: 'timelapse', target: topBtn(5), watch: (c) => c.poll(() => !!q('.tle')) }
+  ]
+}
+
+export const LESSONS: LessonDef[] = [basics, pen, penSetup, nav, color, shapes, layers, selxf, smart, adjust, guidesLesson, quick, exportLesson, gallery, frameLesson, langsLesson]
 
 export const lessonById = (id: string): LessonDef | undefined => LESSONS.find((l) => l.id === id)
 /** i18n key helpers */

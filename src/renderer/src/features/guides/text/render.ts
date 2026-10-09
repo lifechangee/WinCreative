@@ -140,8 +140,8 @@ export interface Rendered {
   box: Layout
 }
 
-/** Rasterise into a canvas covering the rotated box (clamped to the document). null if fully outside. */
-export function renderText(t: TextData, docW: number, docH: number): Rendered | null {
+/** Rasterise into a canvas covering the rotated box (clamped to the document unless `unbounded`: infinite canvas). null if fully outside. */
+export function renderText(t: TextData, docW: number, docH: number, unbounded = false): Rendered | null {
   const box = measureBox(t)
   const pad = t.style.outlineWidth * 2 + t.style.size * 0.4 + 4
   const cx = t.x + box.w / 2
@@ -150,10 +150,10 @@ export function renderText(t: TextData, docW: number, docH: number): Rendered | 
   const si = Math.abs(Math.sin(t.rot))
   const hw = (box.w * co + box.h * si) / 2 + pad
   const hh = (box.w * si + box.h * co) / 2 + pad
-  const x0 = Math.max(0, Math.floor(cx - hw))
-  const y0 = Math.max(0, Math.floor(cy - hh))
-  const x1 = Math.min(docW, Math.ceil(cx + hw))
-  const y1 = Math.min(docH, Math.ceil(cy + hh))
+  const x0 = unbounded ? Math.floor(cx - hw) : Math.max(0, Math.floor(cx - hw))
+  const y0 = unbounded ? Math.floor(cy - hh) : Math.max(0, Math.floor(cy - hh))
+  const x1 = unbounded ? Math.ceil(cx + hw) : Math.min(docW, Math.ceil(cx + hw))
+  const y1 = unbounded ? Math.ceil(cy + hh) : Math.min(docH, Math.ceil(cy + hh))
   if (x1 <= x0 || y1 <= y0) return null
   const canvas = document.createElement('canvas')
   canvas.width = x1 - x0

@@ -202,6 +202,56 @@ export async function runLayersSelfTest(app: App, log: (s: string) => void): Pro
       document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     }
 
+    // ---- OS clipboard (Electron 44 main-process clipboard: async ClipboardItem API), fixed AND infinite documents
+    {
+      const clip = await import('./clipboard')
+      const { encodePng, decodeImage } = await import('../../io/bwk')
+      const clipApi = window.brushworkClip
+      const alphaOf = (d: ImageData): number => {
+        let m = 0
+        for (let i = 3; i < d.data.length; i += 4) m = Math.max(m, d.data[i])
+        return m
+      }
+      for (const kind of ['fixed', 'infinite'] as const) {
+        const cd = kind === 'fixed' ? app.newDocument(256, 256) : app.newDocument(2048, 2048, { kind: 'infinite', background: { color: [1, 1, 1], visible: true } })
+        if (kind === 'infinite') app.setView({ cx: 100, cy: 100, zoom: 1, rot: 0 })
+        const cl = cd.activeLayer
+        const patch = { x: 40, y: 50, w: 60, h: 30 }
+        ops.fillLayer(cd, cl, [1, 0, 0])
+        if (kind === 'infinite') {
+          // keep only a 60x30 patch: clear everything else through a selection-less region write
+          const cl2 = cd.activeLayer
+          const rgba = new Uint8ClampedArray(patch.w * patch.h * 4)
+          for (let i = 0; i < patch.w * patch.h; i++) rgba.set([255, 0, 0, 128], i * 4)
+          cd.clearLayer(cl2.id)
+          const lay = ops.layerFromImage(cd, { x: patch.x, y: patch.y, w: patch.w, h: patch.h, data: rgba }, 'patch')
+          cd.insertLayer(lay, { id: cl2.id, where: 'above' }, 'patch', 'layer-paste')
+          cd.setActive(lay.id)
+        }
+        const copied = await clip.copy(app)
+        const back = clipApi ? await clipApi.readImage() : null
+        const dec = back ? await decodeImage(back) : null
+        check('os clipboard (' + kind + '): copy puts a PNG on the OS clipboard', copied && !!dec && dec.width > 0, dec ? dec.width + 'x' + dec.height : 'none')
+        if (kind === 'infinite') check('os clipboard (infinite): copy is cropped to the content and keeps alpha', !!dec && dec.width === patch.w && dec.height === patch.h && alphaOf(dec) > 100 && alphaOf(dec) < 200, dec ? dec.width + 'x' + dec.height + ' a=' + alphaOf(dec) : 'none')
+        // a foreign image (as if copied in another app) is pasted as a new layer of its own size
+        const fw = 37
+        const fh = 21
+        const fpx = new Uint8ClampedArray(fw * fh * 4)
+        for (let i = 0; i < fw * fh; i++) fpx.set([0, 200, 0, 255], i * 4)
+        await clipApi?.writeImage(await encodePng(fpx, fw, fh))
+        const n0 = cd.layers.length
+        const pasted = await clip.paste(app)
+        const pl = cd.activeLayer
+        check('os clipboard (' + kind + '): foreign image is pasted as a new layer', pasted && cd.layers.length === n0 + 1 && /./.test(pl.name))
+        cd.undo()
+        // our own copy afterwards: paste uses the internal clip (no re-decode), also a layer
+        await clip.copy(app)
+        const n1 = cd.layers.length
+        await clip.paste(app)
+        check('os clipboard (' + kind + '): paste of our own copy', cd.layers.length === n1 + 1)
+      }
+    }
+
     // ---- limits + events
     check('layer limit computed', doc.maxLayers > 2)
     let threw = false

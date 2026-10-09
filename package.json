@@ -1,6 +1,6 @@
 {
   "name": "wincreative",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "WinCreative - a Procreate-inspired painting app for Windows",
   "license": "AGPL-3.0-or-later",
   "homepage": "https://github.com/lifechangee/WinCreative",
@@ -19,6 +19,8 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && electron-vite build",
     "start": "electron-vite preview",
+    "models": "node scripts/models/fetch-bundled.mjs",
+    "predist": "npm run models",
     "dist": "npm run build && electron-builder --win",
     "test": "vitest run",
     "selftest": "node scripts/selftest.mjs",
@@ -29,6 +31,7 @@
     "electron": "^44.4.5",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "onnxruntime-web": "^1.30.0",
     "playwright-core": "^1.63.0",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
@@ -99,6 +102,22 @@
       {
         "from": "node_modules/ffmpeg-static/ffmpeg.exe.README",
         "to": "licenses/ffmpeg-README.txt"
+      },
+      {
+        "from": "resources/models/fast",
+        "to": "models/fast"
+      },
+      {
+        "from": "resources/licenses/onnxruntime-MIT.txt",
+        "to": "licenses/onnxruntime-web-MIT.txt"
+      },
+      {
+        "from": "resources/licenses/MobileSAM-Apache-2.0.txt",
+        "to": "licenses/MobileSAM-Apache-2.0.txt"
+      },
+      {
+        "from": "resources/licenses/SAM2-Apache-2.0.txt",
+        "to": "licenses/SAM2-Apache-2.0.txt"
       }
     ]
   }

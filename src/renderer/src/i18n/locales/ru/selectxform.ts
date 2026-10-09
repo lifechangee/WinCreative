@@ -190,5 +190,9 @@ const dict: Record<string, string> = {
   'selectxform.bar.layersOnly_few': '{count} слоя',
   'selectxform.bar.layersOnly_many': '{count} слоёв',
   'selectxform.bar.layersOnly_other': '{count} слоя',
+
+  'selectxform.limitedWindow': 'Выделение ограничено {n} px',
+  'selectxform.limitedWork': 'Выделение ограничено рамкой / видимой областью',
+  'selectxform.xform.tooBig': 'Область трансформации слишком велика для этого GPU',
 }
 export default dict

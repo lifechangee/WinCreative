@@ -1,7 +1,8 @@
 import { Emitter } from '../../core/events'
 import { prefs } from '../../input/prefs'
 import type { TimelapseRecorder } from './timelapse'
-import { FrameTag, KeepResult, computeKeep } from './tlHistory'
+import { FrameTag, KeepResult } from './tlHistory'
+import { TagFull, keptForVariant, withEdit } from './tlVariants'
 import { Schedule, TlEdit, buildSchedule, cloneEdit, clampEditToFrames, defaultEdit, editsEqual } from './tlModel'
 
 /**
@@ -21,7 +22,7 @@ export const THUMB_W = 96
 
 export class TlEditorCore {
   readonly events = new Emitter<CoreEvents>()
-  tags: (FrameTag & { d: number })[] = []
+  tags: (FrameTag & TagFull & { d: number })[] = []
   keepInfo!: KeepResult
   /** per source frame: shown in the video */
   shown: boolean[] = []
@@ -42,13 +43,21 @@ export class TlEditorCore {
   private thumbQueue: (() => void)[] = []
   private thumbActive = 0
 
-  constructor(readonly rec: TimelapseRecorder) {}
+  /** `fixed`: this core always shows that variant (compare view); undefined = whichever variant the editor works on */
+  constructor(
+    readonly rec: TimelapseRecorder,
+    private fixed?: string | null
+  ) {}
+
+  get variant(): string | null {
+    return this.fixed !== undefined ? this.fixed : this.rec.variantKey
+  }
 
   get n(): number {
     return this.tags.length
   }
   get edit(): TlEdit {
-    return this.rec.edit
+    return this.rec.editFor(this.variant)
   }
   get canUndo(): boolean {
     return this.undoStack.length > 0
@@ -69,22 +78,18 @@ export class TlEditorCore {
 
   recompute(): void {
     const n = this.tags.length
-    const fixed = clampEditToFrames(this.rec.edit, n)
-    if (!editsEqual(fixed, this.rec.edit)) this.rec.edit = fixed
-    this.keepInfo = computeKeep(this.tags, this.rec.tracker.parents)
-    const useKeep = this.rec.edit.hideUndone && this.keepInfo.supported
-    this.shown = useKeep ? this.keepInfo.keep : new Array(n).fill(true)
-    this.kept = []
-    for (let i = 0; i < n; i++) if (this.shown[i]) this.kept.push(i)
-    if (!this.kept.length && n) {
-      // never an empty video: fall back to the last frame
-      this.kept = [n - 1]
-      this.shown[n - 1] = true
-    }
+    const fixed = clampEditToFrames(this.edit, n)
+    if (!editsEqual(fixed, this.edit)) this.rec.editSet = withEdit(this.rec.editSet, this.variant, fixed)
+    // the frames of the variant being edited (all frames without language variants); hide-undone is evaluated on them
+    const res = keptForVariant(this.tags, this.rec.tracker.parents, this.variant, this.edit.hideUndone)
+    this.keepInfo = res.keep
+    this.kept = res.kept
+    this.shown = new Array(n).fill(false)
+    for (const i of this.kept) this.shown[i] = true
     this.nextKept = new Int32Array(n + 1)
     this.nextKept[n] = n
     for (let i = n - 1; i >= 0; i--) this.nextKept[i] = this.shown[i] ? i : this.nextKept[i + 1]
-    this.schedule = buildSchedule(this.kept, this.rec.edit)
+    this.schedule = buildSchedule(this.kept, this.edit)
     this.events.emit('change', undefined)
   }
 
@@ -129,6 +134,16 @@ export class TlEditorCore {
     if (!next) return
     this.undoStack.push(cloneEdit(this.rec.edit))
     this.rec.setEdit(next)
+    this.recompute()
+    this.events.emit('history', undefined)
+  }
+  /** Work on another language variant: its own edit model, its own undo history. */
+  setVariant(v: string | null): void {
+    if (v === this.rec.variantKey) return
+    this.rec.setEditVariant(v)
+    this.undoStack = []
+    this.redoStack = []
+    this.dragBase = null
     this.recompute()
     this.events.emit('history', undefined)
   }

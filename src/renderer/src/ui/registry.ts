@@ -1,6 +1,7 @@
 import type { App } from '../app/app'
 import { Emitter } from '../core/events'
 import { I18nRef, I18nText, inLang, resolveText, t } from '../i18n'
+import { blockedMenuItem, notAvailable } from '../doc/infiniteGuard'
 import type { PopoverHost } from './popover'
 
 /** Passed to menu items and panels. */
@@ -49,6 +50,9 @@ export const menus: Record<MenuId, MenuItem[]> = {
 /** Extension point: add an item to a top-bar menu (Actions, Adjustments, Selection, Transform, Gallery). */
 export function registerMenuItem(menu: MenuId, item: MenuItem): void {
   const list = menus[menu]
+  const run = item.run
+  // infinite canvas: items that touch whole layers / selections are refused with a toast until they are migrated to the tile model
+  if (run) item = { ...item, run: (ctx) => (ctx.app.doc.isInfinite && blockedMenuItem(menu, item.id) ? notAvailable() : run.call(item, ctx)) }
   const i = list.findIndex((m) => m.id === item.id)
   if (i >= 0) list[i] = item
   else list.push(item)

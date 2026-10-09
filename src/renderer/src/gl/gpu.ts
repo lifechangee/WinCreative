@@ -11,6 +11,8 @@ export class Surface {
   readonly uid = ++surfaceUid
   /** bumped whenever the surface is bound as a render target / blit destination = "pixels may have changed" (save cache) */
   rev = 0
+  /** infinite canvas: a layer mask is a 1x1 placeholder surface that owns its sparse tile store (doc/maskStore.ts) */
+  inf?: import('../doc/tileStore').TileStore
   constructor(
     private gpu: GPU,
     public w: number,
@@ -36,6 +38,7 @@ export class Surface {
     return this.w * this.h * (this.fmt === 'rgba16f' ? 8 : 4)
   }
   dispose(): void {
+    this.inf?.dispose()
     this.gpu.gl.deleteTexture(this.tex)
     this.gpu.gl.deleteFramebuffer(this.fbo)
   }
@@ -100,7 +103,13 @@ export class GPU {
   private emptyVao: WebGLVertexArrayObject
   /** 1x1 transparent texture, bound to unused sampler units to avoid feedback loops. */
   blank: WebGLTexture
+  /** 1x1 opaque white (the value of a mask tile that does not exist yet) */
+  white: WebGLTexture
   private programs = new Map<string, Program>()
+
+  /** true between webglcontextlost and webglcontextrestored */
+  lost = false
+  contextListeners: ((s: 'lost' | 'restored') => void)[] = []
 
   constructor(public canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -114,6 +123,19 @@ export class GPU {
     })
     if (!gl) throw new Error('WebGL2 is not available')
     this.gl = gl
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault() // lets the browser restore the context
+      this.lost = true
+      window.brushwork?.diag('webglcontextlost')
+      console.error('[gpu] webglcontextlost')
+      for (const f of this.contextListeners) f('lost')
+    })
+    canvas.addEventListener('webglcontextrestored', () => {
+      this.lost = false
+      window.brushwork?.diag('webglcontextrestored')
+      console.error('[gpu] webglcontextrestored')
+      for (const f of this.contextListeners) f('restored')
+    })
     this.half = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float'))
     gl.getExtension('OES_texture_float_linear')
     this.maxTexture = gl.getParameter(gl.MAX_TEXTURE_SIZE)
@@ -123,6 +145,11 @@ export class GPU {
     this.blank = gl.createTexture()!
     gl.bindTexture(gl.TEXTURE_2D, this.blank)
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4))
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    this.white = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, this.white)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]))
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)

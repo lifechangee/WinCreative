@@ -67,9 +67,12 @@ layout(location = 0) in vec4 aV; // dest x, y (doc px), source u, v (0..1)
 uniform vec2 uCanvas;
 uniform vec2 uBox;
 uniform float uPad;
+uniform vec2 uShift;  // chunked sources: box px of the chunk's core origin
 out vec2 vT;
+out vec2 vB;
 void main(){
-  vT = vec2(uPad) + aV.zw * uBox;
+  vB = aV.zw * uBox;
+  vT = vec2(uPad) + vB - uShift;
   gl_Position = vec4(aV.xy / uCanvas * 2.0 - 1.0, 0.0, 1.0);
 }`
 
@@ -78,7 +81,9 @@ precision highp float;
 uniform sampler2D uTex;
 uniform ivec2 uSize;
 uniform int uInterp; // 0 nearest, 1 bilinear, 2 bicubic
+uniform vec4 uCore;   // box px range [lo, hi) this chunk is responsible for (huge = everything)
 in vec2 vT;
+in vec2 vB;
 out vec4 o;
 vec4 fetch(ivec2 p){ return texelFetch(uTex, clamp(p, ivec2(0), uSize - 1), 0); }
 vec4 sNearest(vec2 t){ return fetch(ivec2(floor(t))); }
@@ -113,6 +118,7 @@ vec4 samp(vec2 t){
 void main(){
   vec2 dx = dFdx(vT), dy = dFdy(vT);
   float sc = max(length(dx), length(dy));
+  if (vB.x < uCore.x || vB.y < uCore.y || vB.x >= uCore.z || vB.y >= uCore.w) discard;
   int n = int(clamp(ceil(sc - 0.25), 1.0, 6.0));
   if (n <= 1) { o = samp(vT); return; }
   vec4 acc = vec4(0.0);
@@ -158,8 +164,10 @@ export function extractFloat(gpu: GPU, src: Surface, rect: Rect, pad: number, as
   const prog = gpu.program('sx:extract', FS_VERT, EXTRACT_FS).use()
   gpu.bindTex(0, src.tex)
   prog.i('uSrc', 0).v2('uCanvas', src.w, src.h).v2('uOrigin', rect.x, rect.y).v2('uBox', rect.w, rect.h).f('uPad', pad).f('uMaskOut', asMask ? 1 : 0)
-  if (useMask) bindClipMask(gpu, prog)
-  else {
+  if (useMask) {
+    bindClipMask(gpu, prog)
+    prog.f('uFrameOn', 0) // lifting content is not painting: the frame never trims it
+  } else {
     gpu.bindTex(4, gpu.blank)
     prog.i('uSelMask', 4).f('uSelOn', 0)
   }
@@ -184,6 +192,7 @@ export function removeSelected(gpu: GPU, orig: Surface, dst: Surface, rect: Rect
   gpu.bindTex(0, orig.tex)
   prog.i('uSrc', 0).v2('uCanvas', orig.w, orig.h)
   bindClipMask(gpu, prog)
+  prog.f('uFrameOn', 0)
   gpu.fullscreen()
   gl.disable(gl.SCISSOR_TEST)
 }
@@ -207,7 +216,7 @@ export class MeshRenderer {
   }
 
   /** Draw `mesh` sampling `src` (padded float surface, content box `box`) over `target` inside `scissor` (premultiplied over). */
-  draw(target: Surface, scissor: Rect, mesh: Mesh, src: Surface, box: { w: number; h: number }, pad: number, interp: Interp): void {
+  draw(target: Surface, scissor: Rect | null, mesh: Mesh, src: Surface, box: { w: number; h: number }, pad: number, interp: Interp, chunk?: { shift: [number, number]; core: [number, number, number, number] }): void {
     const gl = this.gpu.gl
     const gpu = this.gpu
     const prog = gpu.program('sx:mesh', MESH_VS, MESH_FS).use()
@@ -215,6 +224,9 @@ export class MeshRenderer {
     prog.i('uTex', 0).v2('uCanvas', target.w, target.h).v2('uBox', box.w, box.h).f('uPad', pad)
     gl.uniform2i(prog.loc('uSize'), src.w, src.h)
     prog.i('uInterp', interp === 'nearest' ? 0 : interp === 'bilinear' ? 1 : 2)
+    prog.v2('uShift', chunk ? chunk.shift[0] : 0, chunk ? chunk.shift[1] : 0)
+    const c = chunk?.core ?? [-1e9, -1e9, 1e9, 1e9]
+    prog.v4('uCore', c[0], c[1], c[2], c[3])
     gpu.bindTarget(target, scissor)
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)

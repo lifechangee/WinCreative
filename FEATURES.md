@@ -425,6 +425,15 @@ Pen mapping used throughout: Apple Pencil pressure = pen pressure; tilt/azimuth 
 - [x] Transform selection contents
 - [x] Selection tool settings — Selection Mask Visibility in Prefs
  (slider in the selection bar, persisted; not in Prefs panel)
+- [x] Smart selection (Selection menu / bar "Smart", key W) — one tool, mode switch inside its own bar
+  - [x] AI · Fast — MobileSAM (Apache-2.0), bundled (~45 MB), offline; WebGPU with WASM fallback, runs in a Worker, released after 5 idle minutes
+  - [x] AI · Precise — SAM 2.1 Hiera-Small (Apache-2.0), optional ~176 MB download started by the user's click in the bar (progress, cancel, SHA-256 check, delete)
+  - [x] Brush (no AI) — paint over the object, the selection grows to its edges (geodesic segmentation + colour models); Alt / pen eraser end paints "not object"
+  - [x] Click = object, Alt+click / eraser end / right click / "− Remove area" = remove area, drag = box prompt, live hover preview, removable point markers, Detail (part / object / whole)
+  - [x] Sample: current layer / all visible layers; "Refine in view" re-analyses the visible region for small objects; any image size
+  - [x] Edge refinement: guided-filter snap to real edges, soft anti-aliased alpha, Smooth, Feather, Shift edge, Decontaminate colours
+  - [x] Combine with the existing selection: New / Add / Subtract / Intersect; whole session = one undo step
+  - [x] Cut-out actions (bar, Selection menu, bindable actions): Cut to new layer, Copy to new layer, Remove background (layer mask), Copy object (PNG with transparency to the clipboard)
 
 ## 27. Transform
 - [x] Bounding box with 8 handles + rotation node
@@ -644,3 +653,19 @@ Pen mapping used throughout: Apple Pencil pressure = pen pressure; tilt/azimuth 
 - [ ] Apple Pencil pairing UI — (N/A on Windows - skip)
 - [ ] Widgets, Shortcuts app, Stage Manager, Split View, Sidecar — (N/A on Windows - skip)
 - [ ] Camera features (Take a photo, Live Photo, Face reference) — (N/A on Windows - skip)
+
+## Language variants (`features/langvariants/`, docs/LANGUAGE_VARIANTS.md)
+- [x] Language layer: one row, one cell per language (Layers panel > Lang. button, Actions > Add > Language layer); ordinary layers are common to all languages
+- [x] Language switcher in the layers panel (only when the document has a language layer), `lang.cycle` Ctrl+Alt+L, language list editor (2-4 languages), ghost of the other languages (display only)
+- [x] Row operations: rename, visibility, opacity / blend, reorder, duplicate, delete, merge down (language layer onto language layer, cell by cell), flatten into the current language, copy / clear a cell, lock
+- [x] Time-lapse: one frame per variant for common commits, own-language frames for writing; per-variant edit models; Copy edits; Compare versions (by drawing moment / by video time)
+- [x] Export: all languages in one pass (MP4 / HEVC / WebM / GIF), current language only, one image per language, PSD with every language as layers
+- [x] Tutorial lesson "Two languages, one drawing"
+
+## Frame (`features/frame/`)
+One optional **frame** per document (presets 9:16, 16:9 HD/4K, 1:1, 4:5, A4 @300 dpi, custom). Frame ON clips painting (brush / smudge / eraser strokes, filters,
+fills) to the frame (shader-level, `gl/clipMask.ts`: effective clip = selection x frame, pixel exact, tile-aware on infinite canvases) and dims the outside; OFF paints
+anywhere and shows a thin outline. Toggle: button at the bottom right of the canvas (right-click = settings), action `frame.toggle` (Ctrl+Shift+F, bindable / QuickMenu).
+The frame defines the **time-lapse area** (frames are letterboxed into one stable size) and the **export area** (Area: Frame / All content / Whole canvas). Infinite canvas
+without a frame: the time-lapse records the visible screen area. Stored in the `.bwk` (extension `frame`), undoable. `workRect(app)` = region for whole-canvas tools.
+Self-test: `node scripts/selftest.mjs --out <build> frame`; QA: `scripts/qa/qa-frame.mjs`, `qa-frame-tl.mjs`.

@@ -71,10 +71,9 @@ export class LiquifyTool implements PencilTool {
 
   constructor(private c: ToolCtx) {
     const gpu = c.app.gpu
-    const doc = c.app.doc
-    this.disp = c.extra.disp ?? gpu.surface(doc.width, doc.height, 'rgba16f')
+    this.disp = c.extra.disp ?? gpu.surface(c.orig.w, c.orig.h, 'rgba16f')
     c.extra.disp = this.disp
-    this.prev = gpu.surface(doc.width, doc.height, 'rgba16f')
+    this.prev = gpu.surface(c.orig.w, c.orig.h, 'rgba16f')
   }
 
   brushSize(): number {

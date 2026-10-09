@@ -2,7 +2,9 @@ import type { Document } from '../../doc/document'
 import { animioApi, onProgress } from './api'
 import { VideoRes, videoSize } from './schedule'
 import type { TimelapseRecorder } from './timelapse'
-import { computeKeep, KeepResult } from './tlHistory'
+import type { KeepResult } from './tlHistory'
+import { TagFull, keptForVariant } from './tlVariants'
+import { variantFileName } from '../langvariants/model'
 import { OutputPlan, Schedule, TlEdit, buildSchedule, outputPlan } from './tlModel'
 
 export type TlFormat = 'h264' | 'hevc' | 'vp9' | 'gif'
@@ -31,19 +33,16 @@ export interface Resolved {
   schedule: Schedule
   n: number
 }
-export function resolveEdit(tags: { s?: number; t?: string }[], parents: number[], edit: TlEdit): Resolved {
-  const keep = computeKeep(tags, parents)
-  const n = tags.length
-  const useKeep = edit.hideUndone && keep.supported
-  let kept: number[] = []
-  for (let i = 0; i < n; i++) if (!useKeep || keep.keep[i]) kept.push(i)
-  if (!kept.length && n) kept = [n - 1]
-  return { kept, keep, schedule: buildSchedule(kept, edit), n }
+export function resolveEdit(tags: readonly TagFull[], parents: number[], edit: TlEdit, variant: string | null = null): Resolved {
+  const { kept, keep } = keptForVariant(tags, parents, variant, edit.hideUndone)
+  return { kept, keep, schedule: buildSchedule(kept, edit), n: tags.length }
 }
 
-export async function resolveRecorder(rec: TimelapseRecorder, edit: TlEdit = rec.edit): Promise<Resolved> {
+/** The kept frames + schedule of one language variant (null = the whole recording) with that variant's own edit model. */
+export async function resolveRecorder(rec: TimelapseRecorder, which: string | TlEdit | null = rec.variantKey): Promise<Resolved> {
   const tags = await rec.tags()
-  return resolveEdit(tags, rec.tracker.parents, edit)
+  if (which !== null && typeof which === 'object') return resolveEdit(tags, rec.tracker.parents, which, rec.variantKey) // an explicit edit for the edited variant
+  return resolveEdit(tags, rec.tracker.parents, rec.editFor(which), which)
 }
 
 export interface ExportResult {
@@ -56,11 +55,35 @@ export interface ExportResult {
   height: number
 }
 
+export interface VariantExportResult {
+  code: string
+  file: string
+  result: ExportResult
+}
+/**
+ * Every language variant in one pass: `out` = `name.mp4` -> `name.en.mp4`, `name.ru.mp4` ... Each variant uses its own frames and edit model.
+ * `progress(variantIndex, fraction, overall)` is called while encoding; stops at the first failure or cancellation.
+ */
+export async function exportAllVariants(rec: TimelapseRecorder, doc: Document, p: TlExportParams, out: string, progress?: (i: number, f: number, overall: number) => void): Promise<VariantExportResult[]> {
+  const variants = rec.variants
+  const tags = await rec.tags()
+  const done: VariantExportResult[] = []
+  for (let i = 0; i < variants.length; i++) {
+    const v = variants[i]
+    const file = variantFileName(out, v)
+    const resolved = resolveEdit(tags, rec.tracker.parents, rec.editFor(v), v)
+    const result = await exportTimelapse(rec, doc, resolved, p, file, (f) => progress?.(i, f, (i + f) / variants.length), rec.editFor(v))
+    done.push({ code: v, file, result })
+    if (!result.ok) break
+  }
+  return done
+}
+
 /** Render the edited time-lapse to a file through ffmpeg: constant frame rate, frames repeated per the schedule. */
-export async function exportTimelapse(rec: TimelapseRecorder, doc: Document, resolved: Resolved, p: TlExportParams, out: string, progress?: (f: number) => void): Promise<ExportResult> {
+export async function exportTimelapse(rec: TimelapseRecorder, doc: Document, resolved: Resolved, p: TlExportParams, out: string, progress?: (f: number) => void, edit: TlEdit = rec.edit): Promise<ExportResult> {
   const plan = outputPlan(resolved.schedule, p.fps)
-  const sz = videoSize(doc.width, doc.height, p.res)
-  const fin = rec.edit.finale
+  const sz = videoSize(rec.sourceSize().w, rec.sourceSize().h, p.res)
+  const fin = edit.finale
   const off = progress ? onProgress((e) => e.job === 'tl' && progress(e.done / Math.max(1, e.total))) : null
   try {
     const res = await animioApi().tl.export({

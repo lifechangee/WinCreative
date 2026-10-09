@@ -15,7 +15,11 @@ const DICT: Record<Lang, Record<string, string>> = {
     'dialog.save': 'Save',
     'dialog.open': 'Open',
     'dialog.pickFolder': 'Choose a folder',
-    'dialog.allFiles': 'All files'
+    'dialog.allFiles': 'All files',
+    'crash.recovered': 'WinCreative recovered from an unexpected problem. Your last artwork was reopened from the autosave.',
+    'crash.recoveredGpu': 'The graphics driver reset. WinCreative reloaded and reopened your last artwork from the autosave.',
+    'crash.loopTitle': 'WinCreative keeps crashing',
+    'crash.loopBody': 'The window stopped several times in a row, so it was not restarted again. Your artworks are kept in the gallery (autosave). Close WinCreative and start it again; if it keeps happening, lower the memory limits in the preferences or update your graphics driver.'
   },
   ru: {
     'window.title': 'WinCreative',
@@ -23,7 +27,11 @@ const DICT: Record<Lang, Record<string, string>> = {
     'dialog.save': 'Сохранить',
     'dialog.open': 'Открыть',
     'dialog.pickFolder': 'Выберите папку',
-    'dialog.allFiles': 'Все файлы'
+    'dialog.allFiles': 'Все файлы',
+    'crash.recovered': 'WinCreative восстановился после непредвиденного сбоя. Последний рисунок открыт заново из автосохранения.',
+    'crash.recoveredGpu': 'Драйвер видеокарты был сброшен. WinCreative перезагрузился и открыл последний рисунок из автосохранения.',
+    'crash.loopTitle': 'WinCreative постоянно аварийно завершается',
+    'crash.loopBody': 'Окно несколько раз подряд остановилось, поэтому автоматический перезапуск отключён. Ваши рисунки сохранены в галерее (автосохранение). Закройте WinCreative и запустите снова; если это повторяется, уменьшите лимиты памяти в настройках или обновите драйвер видеокарты.'
   }
 }
 

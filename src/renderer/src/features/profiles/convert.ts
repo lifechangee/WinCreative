@@ -55,6 +55,27 @@ export function convertDocument(app: App, to: RgbSpace): boolean {
   doc.transaction('Convert colour profile', 'filter', null, () => {
     for (const l of doc.layers) {
       if (l.isGroup) continue
+      if (l.tiles) {
+        // infinite canvas: tile by tile (evicted tiles are restored on demand), one undo entry per layer
+        const store = l.tiles
+        const tr = { x: 0, y: 0, w: store.size, h: store.size }
+        const tmp = gpu.surface(store.size, store.size, store.fmt, 0) // allocate before binding textures
+        const edit = doc.beginPixelEdit(l, 'Convert profile')
+        for (const key of [...store.keys()]) {
+          edit.saveKey(key)
+          const s = store.getKey(key)!
+          gpu.blit(s, tr, tmp, 0, 0)
+          const p = gpu.program('profile-convert', FS_VERT, FS).use()
+          gpu.bindTex(0, tmp.tex)
+          p.i('uSrc', 0).v3('uM0', m[0], m[1], m[2]).v3('uM1', m[3], m[4], m[5]).v3('uM2', m[6], m[7], m[8]).f('uSrcG', gammaOf(from)).f('uDstG', gammaOf(to))
+          gl.disable(gl.BLEND)
+          gpu.bindTarget(s, null)
+          gpu.fullscreen()
+        }
+        tmp.dispose()
+        edit.finish()
+        continue
+      }
       const edit = doc.beginPixelEdit(l, 'Convert profile')
       edit.save(full)
       gpu.blit(l.pixels, full, doc.scratch, 0, 0)

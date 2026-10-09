@@ -105,5 +105,8 @@ const dict: Record<string, string> = {
   'color.settings.antialias': 'Anti-aliased fill edges',
   'color.palette.builtin.default': 'Default',
   'color.palette.fallbackName': 'Palette',
+
+  'color.fill.outside': 'Click inside the frame / visible area to fill',
+  'color.fill.limited': 'Fill limited to frame/visible area',
 }
 export default dict

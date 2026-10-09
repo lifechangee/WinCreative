@@ -4,8 +4,11 @@ import { readFile, writeFile } from 'fs/promises'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { registerAnimioIpc } from './animio'
 import { registerGalleryIpc } from './gallery'
+import { registerScratchIpc } from './scratch'
 import { registerLayersIpc } from './layersIpc'
+import { registerSmartSelectIpc } from './smartselect'
 import { forcedLang, mt, registerI18nIpc } from './i18n'
+import { diagLog, logRenderGone, startCrashReporting } from './diag'
 
 // GPU / input flags. Must be set before app is ready.
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
@@ -46,7 +49,9 @@ ipcMain.handle('app:hasOpenFiles', () => pendingFiles.length > 0)
 ipcMain.handle('app:takeOpenFiles', () => readOpen(pendingFiles.splice(0)))
 // one running instance per profile (test runs use BW_*TEST env vars and skip the lock)
 const TESTING = Object.keys(process.env).some((k) => /^BW_.*(TEST|MULTI)/.test(k))
-if (!TESTING && !app.requestSingleInstanceLock()) app.quit()
+/** false in a redundant second instance (it only forwards its arguments and quits: it must not touch shared state such as the scratch folder) */
+const PRIMARY = TESTING || app.requestSingleInstanceLock()
+if (!PRIMARY) app.quit()
 else
   app.on('second-instance', (_e, argv) => {
     if (win) {
@@ -111,6 +116,39 @@ async function syncContentBounds(w: BrowserWindow | null): Promise<void> {
   }
 }
 
+// ---- crash recovery: a dead renderer is never left as a blank window. The page is reloaded; on boot it reopens the last artwork
+// (gallery autosave + stroke journal replay) and shows the translated notice taken from `app:takeRecoveryNotice`.
+let recoveryNotice: string | null = null
+const crashTimes: number[] = []
+/** auto-reload is off in self-test runs (they must see a crash as a failure) unless BW_CRASH_RECOVERY=1 */
+const AUTO_RECOVER = !TESTING || process.env.BW_CRASH_RECOVERY === '1'
+function recoverWindow(why: 'crash' | 'oom' | 'gpu'): void {
+  if (!AUTO_RECOVER || !win || win.isDestroyed()) return
+  const now = Date.now()
+  crashTimes.push(now)
+  while (crashTimes.length && now - crashTimes[0] > 60000) crashTimes.shift()
+  if (crashTimes.length > 3) {
+    diagLog('recovery loop: not reloading again')
+    void dialog.showMessageBox(win, { type: 'error', title: mt('crash.loopTitle'), message: mt('crash.loopTitle'), detail: mt('crash.loopBody') })
+    return
+  }
+  recoveryNotice = mt(why === 'gpu' ? 'crash.recoveredGpu' : 'crash.recovered')
+  diagLog(`recovering window (${why})`)
+  setTimeout(() => {
+    if (win && !win.isDestroyed()) win.webContents.reload()
+  }, 300)
+}
+ipcMain.handle('app:takeRecoveryNotice', () => {
+  const n = recoveryNotice
+  recoveryNotice = null
+  return n
+})
+/** the renderer lost its WebGL context for good (driver reset / GPU process crash): all textures are gone, reload and reopen from the autosave */
+ipcMain.on('app:gpuLost', () => recoverWindow('gpu'))
+ipcMain.handle('selftest:crashRenderer', () => {
+  if (TESTING) win?.webContents.forcefullyCrashRenderer()
+})
+
 function createWindow(): void {
   const saved = process.env.BW_NO_WINSTATE === '1' || process.env.BW_SELFTEST === '1' ? null : loadWinState()
   win = new BrowserWindow({
@@ -149,9 +187,13 @@ function createWindow(): void {
     for (const ms of [0, 300, 1500]) setTimeout(() => void syncContentBounds(win), ms)
   })
   win.webContents.on('console-message', (_e, level, message, line, source) => {
-    if (SELFTEST || process.env.BW_INTEG_TEST === '1' || process.env.BW_PERF_SELFTEST === '1' || level >= 2) console.log(`[renderer:${level}] ${message} (${source}:${line})`)
+    if (SELFTEST || process.env.BW_INTEG_TEST === '1' || process.env.BW_PERF_SELFTEST === '1' || process.env.BW_INF_SELFTEST === '1' || process.env.BW_INF_BENCH === '1' || level >= 2) console.log(`[renderer:${level}] ${message} (${source}:${line})`)
   })
-  win.webContents.on('render-process-gone', (_e, d) => console.log('[main] render-process-gone', d.reason))
+  win.webContents.on('render-process-gone', (_e, d) => {
+    console.log('[main] render-process-gone', d.reason, d.exitCode)
+    logRenderGone(win?.webContents ?? null, d)
+    if (d.reason !== 'clean-exit') recoverWindow(d.reason === 'oom' ? 'oom' : 'crash')
+  })
   // Block accidental navigation / new windows (except the "Project canvas" presentation window, an inert about:blank page)
   win.webContents.setWindowOpenHandler(({ frameName }) =>
     frameName === 'bw-projector'
@@ -218,9 +260,12 @@ ipcMain.handle('selftest:content', () => (SELFTEST && win ? { w: win.getContentB
 ipcMain.handle('ui:syncContent', () => syncContentBounds(win))
 ipcMain.handle('ui:fullscreen', (_e, on: boolean) => win?.setFullScreen(!!on))
 
+startCrashReporting()
 registerI18nIpc()
 registerAnimioIpc(() => win)
 registerGalleryIpc()
+registerScratchIpc(PRIMARY)
 registerLayersIpc()
-app.whenReady().then(createWindow)
+registerSmartSelectIpc()
+if (PRIMARY) app.whenReady().then(createWindow)
 app.on('window-all-closed', () => app.quit())

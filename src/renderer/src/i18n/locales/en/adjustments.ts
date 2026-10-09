@@ -4,6 +4,10 @@ const dict: Record<string, string> = {
 
   'adjustments.ui.layerHidden': 'Layer is hidden',
 
+  'adjustments.ui.limit.frame': 'Limited to the frame',
+  'adjustments.ui.limit.view': 'Limited to the visible area',
+  'adjustments.ui.limit.viewAll': 'Preview: work area, Apply: whole layer',
+  'adjustments.ui.limit.tip': 'On an infinite canvas heavy filters work on the frame, or on the visible area when there is no frame',
   'adjustments.ui.nothingToApply': 'Nothing to apply',
 
   'adjustments.ui.layer': 'Layer',

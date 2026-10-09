@@ -4,9 +4,17 @@ import { BLEND_MODES, BlendMode } from '../core/blend'
 import { Compositor } from '../gl/compositor'
 import type { GPU, Surface } from '../gl/gpu'
 import { BlobStore, SaveAborted, docKeyOf, encodeSurface, encodeThumbnail, isCached, markCached, pool, saveHooks, saveStats, surfaceKey, yieldTask } from './asyncSave'
-import { Document } from '../doc/document'
+import { Document, INF_FRAME } from '../doc/document'
+import { TILE, tileKey as tileKeyOf, tileKeyX, tileKeyY } from '../core/tiles'
+import { BWK_VERSION_FIXED, BWK_VERSION_INFINITE, InfiniteMeta, parseInfiniteMeta, parseLayerTiles, parseTileFileName, tileFileName } from './bwkInfinite'
+import { nextTask } from './tileIo'
+import { frameRect } from '../features/frame/workRect'
+import { indexZip, readEntry } from './zipIndex'
+import { newSaved } from '../doc/tileStore'
+import { ByteSink, infSaveStats, writeInfiniteZip } from './bwkSaveInf'
 import { normalizeOrder } from '../doc/layerTree'
 import type { LayerProps } from '../doc/layer'
+import { cleanCode } from '../features/langvariants/model'
 
 /**
  * .bwk = ZIP archive:
@@ -21,10 +29,15 @@ export interface BwkLayerEntry extends LayerProps {
   file: string
   /** PNG of the layer mask, when the layer has one */
   maskFile?: string
+  /** v2 infinite documents: coordinates of the non-empty tiles (files: layers/<id>/<tx>_<ty>.png) */
+  tiles?: [number, number][]
 }
 export interface BwkManifest {
   format: 'brushwork'
-  version: 1
+  /** 1 = fixed document (unchanged since 0.1), 2 = adds `kind` / `infinite` / per-layer `tiles` (only written for infinite documents) */
+  version: 1 | 2
+  kind?: 'fixed' | 'infinite'
+  infinite?: InfiniteMeta
   name: string
   width: number
   height: number
@@ -37,9 +50,28 @@ export interface BwkManifest {
 }
 
 export function buildManifest(doc: Document): BwkManifest {
+  if (doc.isInfinite) {
+    return {
+      format: 'brushwork',
+      version: BWK_VERSION_INFINITE,
+      kind: 'infinite',
+      infinite: { tileSize: TILE, ...(doc.infinite.view ? { view: doc.infinite.view } : {}), ...(doc.infinite.grid ? { grid: true } : {}) },
+      name: doc.name,
+      width: doc.width,
+      height: doc.height,
+      background: { color: [...doc.background.color], visible: doc.background.visible },
+      activeLayer: doc.activeId,
+      layers: doc.layers.map((l) => ({
+        ...l.props,
+        id: l.id,
+        file: '',
+        ...(l.tiles ? { tiles: [...l.tiles.keys()].map((k) => [tileKeyX(k), tileKeyY(k)] as [number, number]) } : {})
+      }))
+    }
+  }
   return {
     format: 'brushwork',
-    version: 1,
+    version: BWK_VERSION_FIXED,
     name: doc.name,
     width: doc.width,
     height: doc.height,
@@ -51,7 +83,8 @@ export function buildManifest(doc: Document): BwkManifest {
 
 export function validateManifest(m: any): BwkManifest {
   if (!m || m.format !== 'brushwork') throw new Error('Not a WinCreative file')
-  if (m.version !== 1) throw new Error('Unsupported .bwk version ' + m.version)
+  if (m.version !== 1 && m.version !== 2) throw new Error('Unsupported .bwk version ' + m.version)
+  const infinite = m.version === 2 ? parseInfiniteMeta(m) : null
   if (!Number.isInteger(m.width) || !Number.isInteger(m.height) || m.width < 1 || m.height < 1) throw new Error('Bad canvas size')
   if (!Array.isArray(m.layers) || m.layers.length === 0) throw new Error('No layers')
   const layers: BwkLayerEntry[] = m.layers.map((l: any, i: number) => {
@@ -75,7 +108,10 @@ export function validateManifest(m: any): BwkManifest {
       drawingAssist: !!l.drawingAssist,
       maskEnabled: l.maskEnabled !== false,
       maskView: false,
-      ...(typeof l.maskFile === 'string' ? { maskFile: l.maskFile } : {})
+      langSet: !!l.isGroup && !!l.langSet,
+      lang: !l.isGroup && typeof l.lang === 'string' ? cleanCode(l.lang) : '',
+      ...(typeof l.maskFile === 'string' ? { maskFile: l.maskFile } : {}),
+      ...(infinite && !l.isGroup ? { tiles: parseLayerTiles(l) } : {})
     }
   })
   const known = new Set(layers.map((l) => l.id))
@@ -91,7 +127,8 @@ export function validateManifest(m: any): BwkManifest {
   const color = Array.isArray(bg.color) && bg.color.length === 3 ? (bg.color.map(Number) as [number, number, number]) : ([1, 1, 1] as [number, number, number])
   return {
     format: 'brushwork',
-    version: 1,
+    version: infinite ? BWK_VERSION_INFINITE : BWK_VERSION_FIXED,
+    ...(infinite ? { kind: 'infinite' as const, infinite } : {}),
     name: String(m.name ?? t('core.common.untitled')),
     width: m.width,
     height: m.height,
@@ -162,12 +199,75 @@ async function makeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, max 
   return new Uint8Array(await blob.arrayBuffer())
 }
 
+/** Gallery thumbnail of an infinite document: the painted area (or a blank page in the background colour), max 256 px. */
+async function infiniteThumbnail(doc: Document, comp: Compositor): Promise<Uint8Array> {
+  const b = frameRect(doc) ?? doc.contentBounds({ tight: true, visibleOnly: true }) // the frame (what the artist presents) wins over the content bounds
+  if (!b) {
+    const px = new Uint8ClampedArray(64 * 64 * 4)
+    const c = doc.background.visible ? doc.background.color : [1, 1, 1]
+    for (let i = 0; i < px.length; i += 4) {
+      px[i] = c[0] * 255
+      px[i + 1] = c[1] * 255
+      px[i + 2] = c[2] * 255
+      px[i + 3] = 255
+    }
+    return encodePng(px, 64, 64)
+  }
+  const pad = Math.max(8, Math.max(b.w, b.h) * 0.03)
+  const r = { x: b.x - pad, y: b.y - pad, w: b.w + 2 * pad, h: b.h + 2 * pad }
+  const sc = Math.min(1, 256 / Math.max(r.w, r.h))
+  const big = doc.tileStats().tiles > 300
+  // time-sliced pre-build (2 ms of composes per slice) even for background saves: the assembly below is then a handful of GPU blits
+  const cl = comp.cleanLang() // a ghost on screen never reaches the gallery thumbnail
+  const inf = cl ? comp.langInf(cl) : comp.inf
+  await inf.prewarm(r, sc, nextTask, big ? 1500 : 8000)
+  inf.readPartial = big
+  let a: ReturnType<Compositor['inf']['assembleRect']> | null = null
+  try {
+    a = inf.assembleRect(r, sc)
+  } finally {
+    inf.readPartial = false
+  }
+  // GPU box-downscale + paper + fenced banded readback (never a pipeline-stalling readPixels on the frame-critical thread)
+  try {
+    return await encodeThumbnail(doc.gpu, a.asm, doc.background.visible ? doc.background.color : null, () => undefined)
+  } finally {
+    a.asm.dispose()
+  }
+}
+
+/** The gallery thumbnail of a big, mostly evicted document is reused from the last save / load (recomposing would restore every tile). */
+const thumbCache = new WeakMap<Document, { png: Uint8Array; at: number }>()
+export function setCachedThumbnail(doc: Document, png: Uint8Array): void {
+  thumbCache.set(doc, { png, at: Date.now() })
+}
+async function cachedInfiniteThumbnail(doc: Document, comp: Compositor, background = false): Promise<Uint8Array> {
+  let cold = 0
+  let total = 0
+  for (const l of doc.layers) if (l.tiles) (cold += l.tiles.coldCount, (total += l.tiles.count))
+  const old = thumbCache.get(doc)
+  // recomposing a big document touches every tile: it keeps its last thumbnail (refreshed every 5 minutes, or while it is small)
+  if (old && total > 300 && (cold * 4 > total || total > 1500 || Date.now() - old.at < 300000)) return old.png
+  const nonBlocking = total > 300 && cold > 0
+  if (nonBlocking) comp.inf.readBlocking = false // render what is resident; never restores hundreds of tiles on the main thread
+  try {
+    // background autosave of a big document: one short partial render (no pyramid pre-build) so an idle save never hitches the UI
+    const t = await infiniteThumbnail(doc, comp)
+    thumbCache.set(doc, { png: t, at: Date.now() })
+    return t
+  } finally {
+    comp.inf.readBlocking = true
+  }
+}
+
 // ------------------------------------------------------------------ save / load
 export interface SaveOptions {
   /** autosave: aborts (SaveAborted) when the artist starts drawing or the document is edited mid-save */
   background?: boolean
   /** recompute the composite for the thumbnail (manual save); autosave reuses the live composite */
   recompose?: boolean
+  /** infinite documents: stream the zip here (main process) instead of returning it; `bytes` is then empty */
+  sink?: ByteSink
 }
 export interface SaveResult {
   bytes: Uint8Array
@@ -232,6 +332,7 @@ async function saveAttempt(doc: Document, compositor: Compositor, extraFiles: Re
     if (opts.background && saveHooks.busy()) throw new SaveAborted('busy')
   }
   check()
+  // infinite: drop tiles that became fully transparent since the last save, so the manifest only lists tiles that get a PNG
   const dk = docKeyOf(doc)
   const gpu = doc.gpu
   const files: Record<string, Uint8Array> = {}
@@ -248,12 +349,40 @@ async function saveAttempt(doc: Document, compositor: Compositor, extraFiles: Re
       entries.push({ name: k, keys })
     }
   }
-  files['manifest.json'] = strToU8(JSON.stringify(manifest, null, 1))
+  if (!doc.isInfinite) files['manifest.json'] = strToU8(JSON.stringify(manifest, null, 1))
+
+  if (doc.isInfinite) {
+    // streaming writer: saved PNGs of clean / evicted tiles are reused, dirty tiles are batched + encoded in parallel
+    let comp0 = compositor
+    let temp0: Compositor | null = null
+    if (compositor.document !== doc) comp0 = temp0 = new Compositor(gpu, doc)
+    let thumb0: Uint8Array
+    try {
+      const tt = performance.now()
+      thumb0 = await cachedInfiniteThumbnail(doc, comp0, !!opts.background)
+      infSaveStats.thumbMs = performance.now() - tt
+    } finally {
+      if (temp0) {
+        temp0.renderer.dispose()
+        temp0.inf.dispose()
+        temp0.composite.dispose()
+      }
+    }
+    check()
+    const late: Record<string, () => Promise<Uint8Array>> = {}
+    for (const en of entries) late[en.name] = async () => new Uint8Array(await pool.cat(dk, en.keys))
+    const bytes = await writeInfiniteZip(doc, { ...files, 'thumbnail.png': thumb0, ...extraFiles }, () => strToU8(JSON.stringify({ ...manifest, layers: buildManifest(doc).layers }, null, 1)), late, opts.sink ?? null, check)
+    return { bytes, thumbnail: thumb0, encoded: infSaveStats.encoded, reused: infSaveStats.reusedBlobs }
+  }
 
   // ---- layers: read back + encode only surfaces changed since the last save (per-surface revision counter)
   const todo: { name: string; surf: Surface }[] = []
   for (const l of doc.layers) {
     if (l.isGroup) continue
+    if (l.tiles) {
+      for (const [k, s] of l.tiles.map) todo.push({ name: tileFileName(l.id, tileKeyX(k), tileKeyY(k)), surf: s })
+      continue
+    }
     todo.push({ name: `layers/${l.id}.png`, surf: l.pixels })
     if (l.mask) todo.push({ name: `masks/${l.id}.png`, surf: l.mask })
   }
@@ -298,11 +427,17 @@ async function saveAttempt(doc: Document, compositor: Compositor, extraFiles: Re
   if (compositor.document !== doc) comp = temp = new Compositor(gpu, doc)
   let thumb: Uint8Array
   try {
-    if (temp || (opts.recompose && !saveHooks.busy())) comp.compose(null, null)
-    thumb = await encodeThumbnail(gpu, comp.composite, doc.background.visible ? doc.background.color : null, check)
+    if (doc.isInfinite) {
+      thumb = await infiniteThumbnail(doc, comp)
+    } else {
+      if (temp || (opts.recompose && !saveHooks.busy())) comp.compose(null, null)
+      const cl = comp.cleanLang() // a ghost on screen never reaches the gallery thumbnail
+      thumb = await encodeThumbnail(gpu, cl ? comp.renderLang(cl) : comp.composite, doc.background.visible ? doc.background.color : null, check)
+    }
   } finally {
     if (temp) {
       temp.renderer.dispose()
+      temp.inf.dispose()
       temp.composite.dispose()
     }
   }
@@ -315,14 +450,32 @@ async function saveAttempt(doc: Document, compositor: Compositor, extraFiles: Re
 }
 
 export async function loadBwk(bytes: Uint8Array, gpu: GPU): Promise<Document> {
-  const entries = unzipSync(bytes)
+  // The central directory is indexed once; infinite documents keep every tile as a zero-copy PNG view (evicted-form tile, decoded on demand,
+  // viewport first), so opening costs only the manifest + thumbnail regardless of the tile count.
+  const index = indexZip(bytes)
+  const entries: Record<string, Uint8Array> = {}
+  for (const [name, en] of index) if (!parseTileFileName(name)) entries[name] = readEntry(bytes, en)
   const mf = entries['manifest.json']
   if (!mf) throw new Error('manifest.json missing')
   const m = validateManifest(JSON.parse(strFromU8(mf)))
-  const doc = new Document(gpu, m.width, m.height, { background: m.background })
+  const inf = m.kind === 'infinite'
+  const doc = new Document(gpu, inf ? INF_FRAME : m.width, inf ? INF_FRAME : m.height, { background: m.background, ...(inf ? { kind: 'infinite' as const } : {}) })
   doc.name = m.name
+  if (m.infinite) doc.infinite = { grid: !!m.infinite.grid, ...(m.infinite.view ? { view: m.infinite.view } : {}) }
   for (const e of m.layers) {
     const layer = doc.createLayer(e, e.id)
+    if (inf && layer.tiles) {
+      for (const [tx, ty] of e.tiles ?? []) {
+        const en = index.get(tileFileName(e.id, tx, ty))
+        if (!en) continue
+        const tp = readEntry(bytes, en)
+        // IHDR width / height must be one tile
+        if (tp.length < 33 || ((tp[16] << 24) | (tp[17] << 16) | (tp[18] << 8) | tp[19]) !== TILE || ((tp[20] << 24) | (tp[21] << 16) | (tp[22] << 8) | tp[23]) !== TILE) continue
+        layer.tiles.putCold(tileKeyOf(tx, ty), newSaved(tp, -1, -1, false))
+      }
+      doc.layers.push(layer)
+      continue
+    }
     const png = e.isGroup ? undefined : entries[e.file]
     if (png) {
       const img = await decodeImage(png)
@@ -339,6 +492,7 @@ export async function loadBwk(bytes: Uint8Array, gpu: GPU): Promise<Document> {
   doc.layers.splice(0, doc.layers.length, ...normalizeOrder(doc.layers))
   doc.activeId = doc.getLayer(m.activeLayer) ? m.activeLayer : doc.layers[doc.layers.length - 1].id
   for (const ext of bwkExtensions) await ext.load?.(doc, m.extra?.[ext.id], entries)
+  if (inf && entries['thumbnail.png']) setCachedThumbnail(doc, entries['thumbnail.png'])
   doc.emitCommit('load', null, null, 'Open document')
   return doc
 }

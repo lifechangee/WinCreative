@@ -55,7 +55,9 @@ export function findFfmpeg(): FfmpegInfo | null {
 
 // ------------------------------------------------------------------ time-lapse store
 /** o/l = byte range of the JPEG, d = ms since the previous frame, t = commit type, s = history state id (see tlHistory.ts) */
-type TlIdx = { o: number; l: number; d: number; t?: string; s?: number }
+/** r = source rectangle [x, y, w, h] (document px) this frame shows (frame / viewport recordings; features/frame/tlCapture.ts) */
+/** v = language variants the frame belongs to (absent = all), g = capture group (frames written by one capture pass share it) - features/langvariants */
+type TlIdx = { o: number; l: number; d: number; t?: string; s?: number; r?: number[]; v?: string[]; g?: number }
 interface Rec {
   path: string
   fh: FileHandle | null
@@ -93,9 +95,29 @@ const seq = <T>(r: Rec, fn: () => Promise<T>): Promise<T> => {
 }
 async function startRec(id: string): Promise<Rec> {
   const old = recs.get(id)
-  if (old) await closeRec(id)
+  if (old) {
+    // restart IN PLACE (queued behind every running operation): closing + re-creating leaves a window in which the id is unknown and a
+    // concurrent packInfo / packRange / append of the gallery autosave fails with "No time-lapse recording"; the new generation makes such a
+    // save throw 'rewritten while saving' (it is retried) instead
+    return seq(old, async () => {
+      await old.fh!.truncate(0)
+      old.offset = 0
+      old.index = []
+      old.gen = ++recGen
+      return old
+    })
+  }
   const path = join(dir(), id.replace(/[^\w-]/g, '_') + '.bin')
-  const fh = await open(path, 'w+')
+  // Windows: re-creating a file that was just deleted can fail with EPERM while the delete is still pending
+  let fh: Awaited<ReturnType<typeof open>> | null = null
+  for (let i = 0; !fh; i++) {
+    try {
+      fh = await open(path, 'w+')
+    } catch (e) {
+      if (i >= 8 || (e as NodeJS.ErrnoException).code !== 'EPERM') throw e
+      await new Promise((r) => setTimeout(r, 60))
+    }
+  }
   const r: Rec = { path, fh, offset: 0, index: [], chain: Promise.resolve(), gen: ++recGen }
   recs.set(id, r)
   return r
@@ -219,7 +241,7 @@ export function registerAnimioIpc(getWin: () => BrowserWindow | null): void {
   ipcMain.handle('tl:start', async (_e, id: string) => {
     await startRec(id)
   })
-  ipcMain.handle('tl:append', (_e, id: string, bytes: Uint8Array, dtMs: number, meta?: { t?: string; s?: number }) => {
+  ipcMain.handle('tl:append', (_e, id: string, bytes: Uint8Array, dtMs: number, meta?: { t?: string; s?: number; r?: number[]; v?: string[]; g?: number }) => {
     const r = need(id)
     return seq(r, async () => {
       const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
@@ -229,6 +251,9 @@ export function registerAnimioIpc(getWin: () => BrowserWindow | null): void {
         e.s = meta.s
         if (typeof meta.t === 'string') e.t = meta.t.slice(0, 24)
       }
+      if (Array.isArray(meta?.r) && meta!.r.length === 4 && meta!.r.every((n) => Number.isFinite(n))) e.r = meta!.r.map((n) => Math.round(n))
+      if (Array.isArray(meta?.v) && meta!.v.length) e.v = meta!.v.filter((x) => typeof x === 'string').map((x) => x.slice(0, 8)).slice(0, 8)
+      if (typeof meta?.g === 'number' && Number.isFinite(meta.g)) e.g = Math.floor(meta.g)
       r.index.push(e)
       r.offset += buf.length
       return { count: r.index.length, bytes: r.offset }
@@ -284,12 +309,26 @@ export function registerAnimioIpc(getWin: () => BrowserWindow | null): void {
     const r = need(id)
     return seq(r, async () => {
       const keep: TlIdx[] = []
+      const survivors: number[] = []
       const src = r.index
       const n = src.length
+      // thinning runs per "lane" (frames sharing one variant tag), so every language keeps an even sampling; the last frame of each lane survives
+      const lane = (e: TlIdx): string => (e.v ? e.v.join(',') : '*')
+      const cnt = new Map<string, number>()
+      const lastOf = new Map<string, number>()
+      src.forEach((e, i) => lastOf.set(lane(e), i))
       for (let i = 0; i < n; i++) {
-        // dropped odd frames donate their time to the survivor so tracked time stays the same
-        if (i % 2 === 0) keep.push({ ...src[i], d: src[i].d + (i + 1 < n - 1 ? src[i + 1].d : 0) })
-        else if (i === n - 1) keep.push({ ...src[i] })
+        const l = lane(src[i])
+        const c = cnt.get(l) ?? 0
+        cnt.set(l, c + 1)
+        // dropped frames donate their time to the survivor so tracked time stays the same
+        if (c % 2 === 0) {
+          keep.push({ ...src[i], d: src[i].d + (i + 1 < n - 1 && lane(src[i + 1]) === l ? src[i + 1].d : 0) })
+          survivors.push(i)
+        } else if (lastOf.get(l) === i) {
+          keep.push({ ...src[i] })
+          survivors.push(i)
+        }
       }
       // compact into a fresh file to actually reclaim disk
       const tmp = r.path + '.tmp'
@@ -311,13 +350,13 @@ export function registerAnimioIpc(getWin: () => BrowserWindow | null): void {
       r.index = ni
       r.offset = off
       r.gen = ++recGen
-      return { count: ni.length, bytes: off }
+      return { count: ni.length, bytes: off, survivors }
     })
   })
   ipcMain.handle('tl:close', (_e, id: string) => closeRec(id))
   ipcMain.handle('tl:index', (_e, id: string) => recs.get(id)?.index.map((x) => x.d) ?? [])
   /** Per-frame metadata for the time-lapse editor: ms since previous frame, commit type, history state id. */
-  ipcMain.handle('tl:tags', (_e, id: string) => recs.get(id)?.index.map((x) => ({ d: x.d, t: x.t, s: x.s })) ?? [])
+  ipcMain.handle('tl:tags', (_e, id: string) => recs.get(id)?.index.map((x) => ({ d: x.d, t: x.t, s: x.s, r: x.r, v: x.v, g: x.g })) ?? [])
 
   ipcMain.handle('tl:export', async (e, o: TlExportOpts) => {
     const r = need(o.id)

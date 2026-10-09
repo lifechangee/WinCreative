@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'src', 'renderer', 'src')
 const args = process.argv.slice(2)
-const MODULES = ['core', 'ui', 'brushes', 'layers', 'color', 'gallery', 'adjustments', 'selectxform', 'guides', 'animio', 'interface', 'tutorial']
+const MODULES = ['core', 'ui', 'brushes', 'layers', 'color', 'gallery', 'adjustments', 'selectxform', 'smartselect', 'guides', 'animio', 'interface', 'tutorial', 'langs']
 const only = args.filter((a) => MODULES.includes(a))
 const list = args.includes('--list') || only.length > 0
 const strict = args.includes('--strict')
@@ -24,6 +24,7 @@ function moduleOf(rel) {
     if (f === 'color') return /gallery/i.test(rel) ? 'gallery' : 'color'
     if (f === 'profiles') return 'color'
     if (f === 'psdimport') return 'animio'
+    if (f === 'langvariants') return 'langs'
     if (MODULES.includes(f)) return f
     return 'core'
   }

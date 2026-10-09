@@ -45,7 +45,13 @@ export class PaintTool implements Tool {
   begin(s: Sample, host: ToolHost): boolean {
     const { doc, engine, state } = host
     this.host = host
-    let layer = doc.activeLayer
+    let layer: Layer
+    try {
+      layer = doc.writableActive() // a language layer: the cell of the view language is created on the first stroke
+    } catch (e) {
+      host.notify((e as Error).message || t('core.tool.selectInGroup'))
+      return false
+    }
     strokeHooks.beforeBegin(layer.id)
     layer = doc.activeLayer
     if (!layer.visible) {

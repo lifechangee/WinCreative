@@ -41,15 +41,16 @@ export class CloneTool implements PencilTool {
 
   constructor(private c: ToolCtx) {
     const gpu = c.app.gpu
-    const doc = c.app.doc
-    this.acc = c.extra.cloneAcc ?? gpu.surface(doc.width, doc.height, doc.format)
+    const W = c.orig.w
+    const H = c.orig.h
+    this.acc = c.extra.cloneAcc ?? gpu.surface(W, H, c.orig.fmt)
     c.extra.cloneAcc = this.acc
-    gpu.blit(c.orig, { x: 0, y: 0, w: doc.width, h: doc.height }, this.acc, 0, 0)
-    this.engine = new MaskEngine(gpu, c.fx, doc.width, doc.height)
+    gpu.blit(c.orig, { x: 0, y: 0, w: W, h: H }, this.acc, 0, 0)
+    this.engine = new MaskEngine(gpu, c.fx, W, H)
     this.engine.onDirty = (r) => this.live(r)
     this.engine.onEnd = (r) => this.bake(r)
     this.host = {
-      doc: { activeLayer: c.layer, emitCommit: () => {} },
+      doc: { activeLayer: c.layer, writableActive: () => c.layer, emitCommit: () => {} },
       engine: this.engine,
       state: c.app.state,
       requestRender: () => c.app.requestRender(),
@@ -86,10 +87,10 @@ export class CloneTool implements PencilTool {
        vec4 fx(){ vec4 base = texture(uT0, vUv); float m = texture(uT1, vUv).a;
          if (uErase > 0.5) return mix(base, texture(uT2, vUv), m);
          vec4 s = texture(uT0, vUv + uOff / uCanvas); return s * m + base * (1.0 - s.a * m); }`,
-      this.c.layer.surface,
+      this.c.target,
       { tex: [this.acc, this.engine.view, this.c.orig], u: { uOff: off, uErase: this.erasing ? 1 : 0 }, rect: r }
     )
-    this.c.app.doc.events.emit('change', { rect: r })
+    this.c.changed(r)
   }
 
   private bake(r: Rect): void {
@@ -98,7 +99,7 @@ export class CloneTool implements PencilTool {
     snap.save(r)
     this.snaps.push(snap)
     if (this.snaps.length > 20) this.snaps.shift()?.dispose()
-    gpu.blit(this.c.layer.surface, r, this.acc, r.x, r.y)
+    gpu.blit(this.c.target, r, this.acc, r.x, r.y)
     this.all = unionRect(this.all, r)
     this.engine.wipe(r)
   }
@@ -137,8 +138,8 @@ export class CloneTool implements PencilTool {
   }
 
   private syncLayer(r: Rect): void {
-    this.c.app.gpu.blit(this.acc, r, this.c.layer.surface, r.x, r.y)
-    this.c.app.doc.events.emit('change', { rect: r })
+    this.c.app.gpu.blit(this.acc, r, this.c.target, r.x, r.y)
+    this.c.changed(r)
   }
 
   undo(): boolean {

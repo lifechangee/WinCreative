@@ -94,10 +94,25 @@ class Pool {
     }
   }
 
+  /** Forget everything the archive cached for a closed document (PNGs, time-lapse blobs). Never spawns the worker. */
+  drop(doc: string): void {
+    this.archive?.postMessage({ t: 'drop', doc })
+  }
+
   /** Hand an encoded PNG to the archive (transfers the buffer). */
   store(doc: string, key: string, png: ArrayBuffer): void {
     this.ensure()
     this.archive!.postMessage({ t: 'store', doc, key, png }, [png])
+  }
+
+  /** concatenated archive blobs (extension data such as the time-lapse), fetched for the streaming writer */
+  cat(doc: string, keys: string[]): Promise<ArrayBuffer> {
+    this.ensure()
+    const id = ++this.seq
+    return new Promise((ok, err) => {
+      this.waiting.set(id, { ok, err, w: this.archive! })
+      this.archive!.postMessage({ t: 'cat', id, doc, keys })
+    })
   }
 
   zip(doc: string, entries: { name: string; keys: string[] }[], files: Record<string, Uint8Array>, keep: string[]): Promise<ArrayBuffer> {
@@ -123,6 +138,11 @@ export const docKeyOf = (doc: object): string => {
   let k = docKeys.get(doc)
   if (!k) docKeys.set(doc, (k = 'd' + ++docKeySeq))
   return k
+}
+/** The document was closed: free what the archive worker cached for it (it keeps up to 3 documents otherwise). */
+export function dropArchive(doc: object): void {
+  const k = docKeys.get(doc)
+  if (k) pool.drop(k)
 }
 export const surfaceKey = (s: Surface): string => String(s.uid)
 
@@ -330,4 +350,28 @@ export async function encodeRect(gpu: GPU, src: Surface, x: number, y: number, w
   } finally {
     small.dispose()
   }
+}
+
+/**
+ * PNG of an in-memory straight-alpha RGBA8 bitmap, encoded in the save Worker (no canvas, no main-thread zlib): row bands are copied out in ~2 MB
+ * pieces with a yield between them, so a 100 Mpx export keeps the UI alive and reports progress (0..1).
+ */
+export async function encodePngRows(data: Uint8ClampedArray, w: number, h: number, onProgress?: (f: number) => void, check: () => void = () => undefined): Promise<Uint8Array> {
+  const job = pool.png(w, h)
+  const rowsPer = Math.max(1, Math.floor(BAND_BYTES / (w * 4)))
+  try {
+    for (let y0 = 0; y0 < h; y0 += rowsPer) {
+      check()
+      const rows = Math.min(rowsPer, h - y0)
+      const band = new Uint8Array(w * rows * 4)
+      band.set(data.subarray(y0 * w * 4, (y0 + rows) * w * 4))
+      job.rows(band.buffer)
+      onProgress?.((y0 + rows) / h)
+      await yieldTask()
+    }
+  } catch (e) {
+    job.cancel()
+    throw e
+  }
+  return new Uint8Array(await job.end())
 }

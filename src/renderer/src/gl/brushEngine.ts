@@ -2,13 +2,16 @@ import { BLEND_MODES, blendIndex } from '../core/blend'
 import { BrushPreset, DUAL_BLENDS, BURNT_MODES, GRAIN_BLENDS, isBlendingMode } from '../core/brush'
 import type { Dab, Rect } from '../core/types'
 import { clampToCanvas, dabBounds, unionRect } from '../core/geometry'
+import { TILE, TileKey, intRect, tileKey, tileKeyX, tileKeyY, tileRange, tilesIn } from '../core/tiles'
 import type { DabEx } from '../core/dynamics'
 import { getTextureDef } from '../brush/textures'
 import type { Document } from '../doc/document'
 import type { Layer } from '../doc/layer'
 import type { PixelEdit } from '../doc/pixelEdit'
 import { GPU, Program, Surface } from './gpu'
-import { bindClipMask } from './clipMask'
+import { bindClipMask, setClipCtx } from './clipMask'
+import { MaskTileStore } from '../doc/maskStore'
+import { StrokeTiles, SurfacePool, TileSource } from './strokeTiles'
 import { COMMIT_FS, FS_VERT } from './shaders'
 import { DAB_FS, DAB_VS, DIRECT_FS, FINAL_FS, LOAD_FS } from './dabShaders'
 
@@ -31,20 +34,30 @@ export interface LiveStroke {
   opacity: number
   wet: number
   alphaLock: boolean
+  /** fixed documents: the full-canvas stroke buffer (infinite documents: a 1x1 placeholder, see `tiles`) */
   surface: Surface
+  /** infinite documents: the sparse stroke buffer, looked up per tile by the compositor */
+  tiles?: TileSource
 }
 
 /** Set the STROKE_CHUNK uniforms (shared by compositor & commit passes). */
-export function setStrokeUniforms(gpu: GPU, p: Program, live: LiveStroke | null, alphaLock: boolean): void {
-  bindClipMask(gpu, p)
+export function setStrokeUniforms(gpu: GPU, p: Program, live: LiveStroke | null, alphaLock: boolean, strokeTex?: WebGLTexture, region?: Rect): void {
+  bindClipMask(gpu, p, region)
   if (live) {
-    gpu.bindTex(1, live.surface.tex)
+    gpu.bindTex(1, strokeTex ?? live.surface.tex)
     p.i('uStroke', 1).i('uStrokeMode', live.mode).f('uStrokeOpacity', live.opacity).f('uWet', live.wet).f('uAlphaLock', alphaLock ? 1 : 0)
   } else {
     gpu.bindTex(1, gpu.blank)
     p.i('uStroke', 1).i('uStrokeMode', 0).f('uStrokeOpacity', 1).f('uWet', 0).f('uAlphaLock', 0)
   }
 }
+
+/**
+ * Dither phase of a tile (px): the tile origin modulo 4096, computed exactly on the CPU. The noise functions lose all precision for
+ * huge arguments (and would stop dithering far from the origin), so the phase wraps; inside a 4096 window it equals the global
+ * pixel coordinate, i.e. identical to a fixed canvas.
+ */
+export const ditherOrigin = (tileIndex: number): number => (((tileIndex * TILE) % 4096) + 4096) % 4096
 
 const FLOATS_PER_DAB = 20
 const MAX_BATCH = 2048
@@ -109,11 +122,26 @@ export class BrushEngine {
   private directBlend = false
   private blendIdx = 0
   private doc: Document
+  /** infinite canvas: the current stroke targets a tiled layer (sparse stroke buffers, per-tile passes) */
+  private inf = false
+  private sA: StrokeTiles
+  private sB: StrokeTiles
+  private sC: StrokeTiles
+  private pool: SurfacePool
+  private dummy: Surface
+  /** infinite smudge / wet-mix: region assembled from tiles (lazy) and a tile-sized copy used by the stroke commit */
+  private infScratch: Surface | null = null
+  private tileTmp: Surface | null = null
 
   constructor(private gpu: GPU, doc: Document) {
     this.gl = gpu.gl
     this.doc = doc
     this.texCache = texCaches.get(gpu) ?? texCaches.set(gpu, new Map()).get(gpu)!
+    this.pool = new SurfacePool(gpu, 'rgba16f')
+    this.sA = new StrokeTiles(this.pool)
+    this.sB = new StrokeTiles(this.pool)
+    this.sC = new StrokeTiles(this.pool)
+    this.dummy = gpu.surface(1, 1, 'rgba16f', 0)
     this.dabProg = gpu.program('dab2', DAB_VS, DAB_FS)
     this.loadProg = gpu.program('dabload', FS_VERT, LOAD_FS)
     this.finalProg = gpu.program('dabfinal', FS_VERT, FINAL_FS)
@@ -159,7 +187,8 @@ export class BrushEngine {
     this.C?.dispose()
     this.base?.dispose()
     this.B = this.C = this.base = null
-    this.A = this.gpu.surface(this.doc.width, this.doc.height, 'rgba16f')
+    // infinite documents stamp into sparse tile buffers: no full-canvas surface at all
+    this.A = this.doc.isInfinite ? this.gpu.surface(1, 1, 'rgba16f', 0) : this.gpu.surface(this.doc.width, this.doc.height, 'rgba16f')
   }
 
   get active(): boolean {
@@ -175,7 +204,8 @@ export class BrushEngine {
       opacity: this.params.opacity,
       wet: 0,
       alphaLock: this.layer.alphaLock,
-      surface: this.needFinal ? this.C! : this.A
+      surface: this.inf ? this.dummy : this.needFinal ? this.C! : this.A,
+      ...(this.inf ? { tiles: this.needFinal ? this.sC : this.sA } : {})
     }
   }
 
@@ -192,6 +222,7 @@ export class BrushEngine {
     this.params = params
     this.liveRect = null
     this.frameDirty = null
+    this.inf = !!layer.editTiles
     const b = params.preset
     const mode = params.mode
     this.kind = mode === 'smudge' ? 'smudge' : mode === 'paint' && isBlendingMode(b.render.mode) ? 'mix' : 'stamp'
@@ -199,16 +230,19 @@ export class BrushEngine {
     this.needFinal = this.kind === 'stamp' && (dual || b.wetEdge > 0 || b.render.burnt > 0 || b.render.alphaThreshold > 0)
     this.directBlend = this.kind === 'stamp' && mode === 'paint' && (b.render.blendMode !== 'normal' || b.render.luminance)
     const gpu = this.gpu
-    if (dual && !this.B) this.B = gpu.surface(this.doc.width, this.doc.height, 'rgba16f')
-    if (this.needFinal && !this.C) this.C = gpu.surface(this.doc.width, this.doc.height, 'rgba16f')
+    if (!this.inf && dual && !this.B) this.B = gpu.surface(this.doc.width, this.doc.height, 'rgba16f')
+    if (!this.inf && this.needFinal && !this.C) this.C = gpu.surface(this.doc.width, this.doc.height, 'rgba16f')
     if (this.kind === 'smudge') this.edit = this.doc.beginPixelEdit(layer, 'Smudge')
     else if (this.kind === 'mix') {
       this.edit = this.doc.beginPixelEdit(layer, 'Brush stroke')
       this.initLoad(params.color)
     } else if (this.directBlend) {
       this.edit = this.doc.beginPixelEdit(layer, 'Brush stroke')
-      if (!this.base) this.base = gpu.surface(this.doc.width, this.doc.height, layer.surface.fmt)
-      gpu.blit(layer.surface, { x: 0, y: 0, w: this.doc.width, h: this.doc.height }, this.base, 0, 0)
+      // infinite: the edit's per-tile "before" snapshots serve as the base, no full copy
+      if (!this.inf) {
+        if (!this.base) this.base = gpu.surface(this.doc.width, this.doc.height, layer.surface.fmt)
+        gpu.blit(layer.surface, { x: 0, y: 0, w: this.doc.width, h: this.doc.height }, this.base, 0, 0)
+      }
       let bi = blendIndex(b.render.blendMode as (typeof BLEND_MODES)[number])
       if (bi <= 0) bi = b.render.luminance ? blendIndex('luminosity') : 0
       this.blendIdx = bi
@@ -256,7 +290,9 @@ export class BrushEngine {
     const gr = brush.grain
     const grain = this.tex(gr.texture)
     p.use()
-    p.v2('uCanvas', this.doc.width, this.doc.height).i('uMode', mode)
+    if (this.inf) p.v2('uCanvas', TILE, TILE).v2('uOrigin', 0, 0).v2('uSrcOff', 0, 0).v2('uSrcSize', 1, 1)
+    else p.v2('uCanvas', this.doc.width, this.doc.height).v2('uOrigin', 0, 0).v2('uSrcOff', 0, 0).v2('uSrcSize', this.doc.width, this.doc.height)
+    p.i('uMode', mode)
     p.f('uHardness', brush.hardness)
     p.i('uHasTip', tip ? 1 : 0).i('uTipInvert', brush.shape.invert ? 1 : 0).i('uTip', 1)
     p.i('uHasGrain', grain && gr.depth > 0 ? 1 : 0).i('uGrain', 2).i('uSrc', 3).i('uLoad', 5)
@@ -271,7 +307,7 @@ export class BrushEngine {
     gpu.bindTex(2, grain?.tex ?? gpu.blank)
     gpu.bindTex(3, gpu.blank)
     gpu.bindTex(5, gpu.blank)
-    bindClipMask(gpu, p)
+    bindClipMask(gpu, p, this.inf ? { x: 0, y: 0, w: TILE, h: TILE } : undefined)
     gl.bindSampler(1, this.samplers['tip-' + brush.shape.filtering])
     gl.bindSampler(2, this.samplers['grain-' + gr.filtering])
   }
@@ -286,20 +322,21 @@ export class BrushEngine {
     gl.disable(gl.SCISSOR_TEST)
   }
 
-  private upload(dabs: DabEx[], from: number, n: number): void {
+  /** Upload dabs; (ox,oy) is subtracted from their positions (infinite canvas: coordinates become tile-relative = exact in float32). */
+  private upload(dabs: DabEx[], from: number, n: number, ox = 0, oy = 0): void {
     const d = this.data
     const c = this.params!.color
     for (let i = 0; i < n; i++) {
       const s = dabs[from + i]
       const o = i * FLOATS_PER_DAB
-      d[o] = s.x
-      d[o + 1] = s.y
+      d[o] = s.x - ox
+      d[o + 1] = s.y - oy
       d[o + 2] = s.size
       d[o + 3] = s.angle
       d[o + 4] = s.alpha
       d[o + 5] = s.roundness
-      d[o + 6] = s.px
-      d[o + 7] = s.py
+      d[o + 6] = s.px - ox
+      d[o + 7] = s.py - oy
       d[o + 8] = s.r ?? c[0]
       d[o + 9] = s.g ?? c[1]
       d[o + 10] = s.b ?? c[2]
@@ -330,6 +367,7 @@ export class BrushEngine {
     const gpu = this.gpu
     const params = this.params!
     const brush = target === 1 ? params.preset.dual.brush! : params.preset
+    if (this.inf) return this.stampPaintInf(dabs, target, brush)
     const surf = target === 1 ? this.B! : this.A
     const p = this.dabProg
     this.setupDabState(p, 0, brush, target === 1)
@@ -351,6 +389,197 @@ export class BrushEngine {
     if (this.needFinal) this.finalize(r)
     if (this.directBlend) this.applyDirect(r)
     this.frameDirty = unionRect(this.frameDirty, r)
+  }
+
+  // ------------------------------------------------------------------ infinite canvas: tile passes
+  /** Rect -> the tiles it touches, as keys with their tile-local scissor rect. */
+  private tileSpans(r: Rect): { key: TileKey; tx: number; ty: number; local: Rect }[] {
+    const out: { key: TileKey; tx: number; ty: number; local: Rect }[] = []
+    for (const { tx, ty } of tilesIn(r)) {
+      const x0 = Math.max(r.x, tx * TILE)
+      const y0 = Math.max(r.y, ty * TILE)
+      const x1 = Math.min(r.x + r.w, (tx + 1) * TILE)
+      const y1 = Math.min(r.y + r.h, (ty + 1) * TILE)
+      out.push({ key: tileKey(tx, ty), tx, ty, local: { x: x0 - tx * TILE, y: y0 - ty * TILE, w: x1 - x0, h: y1 - y0 } })
+    }
+    return out
+  }
+
+  private stampPaintInf(dabs: DabEx[], target: 0 | 1, brush: BrushPreset): void {
+    const gl = this.gl
+    const gpu = this.gpu
+    const store = target === 1 ? this.sB : this.sA
+    const p = this.dabProg
+    // bucket the dabs per tile they touch
+    const groups = new Map<TileKey, DabEx[]>()
+    let bounds: Rect | null = null
+    for (const d of dabs) {
+      const b = dabBounds(d.x, d.y, d.size, 3)
+      bounds = unionRect(bounds, b)
+      const g = tileRange(b)
+      if (!g) continue
+      for (let ty = g.ty0; ty <= g.ty1; ty++) {
+        for (let tx = g.tx0; tx <= g.tx1; tx++) {
+          const k = tileKey(tx, ty)
+          const list = groups.get(k)
+          if (list) list.push(d)
+          else groups.set(k, [d])
+        }
+      }
+    }
+    if (!bounds) return
+    // allocate first: creating a texture re-binds the ACTIVE texture unit, which would alias a unit the dab program samples
+    // (a render target bound as texture = feedback loop = the draw is dropped)
+    for (const key of groups.keys()) store.ensure(key)
+    this.setupDabState(p, 0, brush, target === 1)
+    gl.enable(gl.BLEND)
+    if (brush.render.mode === 'uniformedGlaze' || usesMaxCoverage(brush)) {
+      gl.blendEquation(gl.MAX)
+      gl.blendFunc(gl.ONE, gl.ONE)
+    } else gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+    for (const [key, list] of groups) {
+      const ox = tileKeyX(key) * TILE
+      const oy = tileKeyY(key) * TILE
+      gpu.bindTarget(store.ensure(key), null)
+      p.v2('uOrigin', ox, oy)
+      for (let i = 0; i < list.length; i += MAX_BATCH) {
+        const n = Math.min(MAX_BATCH, list.length - i)
+        this.upload(list, i, n, ox, oy)
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n)
+      }
+    }
+    this.endDabState()
+    const r = intRect(bounds)
+    this.liveRect = unionRect(this.liveRect, r)
+    if (this.needFinal) this.finalizeInf(r)
+    if (this.directBlend) this.applyDirectInf(r)
+    this.frameDirty = unionRect(this.frameDirty, r)
+  }
+
+  private finalizeInf(r: Rect): void {
+    const gpu = this.gpu
+    const b = this.params!.preset
+    const spans = this.tileSpans(r).filter((s) => this.sA.get(s.key) || this.sB.get(s.key))
+    for (const s of spans) this.sC.ensure(s.key) // allocate before binding (see stampPaintInf)
+    const p = this.finalProg.use()
+    const dual = b.dual.enabled && !!b.dual.brush && this.sB.map.size > 0
+    const dm = b.render.classicCombine ? 0 : Math.max(0, DUAL_BLENDS.indexOf(b.dual.mode))
+    p.i('uA', 0).i('uB', 1).i('uDual', dual ? 1 : 0).i('uDualMode', dm).f('uDualOpacity', b.dual.opacity)
+    p.f('uWet', b.wetEdge).f('uBurnt', b.render.burnt).i('uBurntMode', Math.max(0, BURNT_MODES.indexOf(b.render.burntMode))).f('uThr', b.render.alphaThreshold)
+    for (const s of spans) {
+      const a = this.sA.get(s.key)
+      const bb = this.sB.get(s.key)
+      gpu.bindTex(0, a?.tex ?? gpu.blank)
+      gpu.bindTex(1, bb?.tex ?? gpu.blank)
+      gpu.bindTarget(this.sC.ensure(s.key), s.local)
+      gpu.fullscreen()
+    }
+    this.gl.disable(this.gl.SCISSOR_TEST)
+  }
+
+  private applyDirectInf(r: Rect): void {
+    const gpu = this.gpu
+    const layer = this.layer!
+    const edit = this.edit!
+    const src = this.needFinal ? this.sC : this.sA
+    const spans = this.tileSpans(r).filter((s) => src.get(s.key))
+    for (const s of spans) {
+      edit.saveKey(s.key) // snapshots + tile allocation happen before any texture is bound
+      layer.editTiles!.ensure(s.tx, s.ty)
+    }
+    const p = this.directProg.use()
+    bindClipMask(gpu, p, { x: 0, y: 0, w: TILE, h: TILE })
+    p.i('uBase', 0).i('uStroke', 1).i('uBlend', this.blendIdx).f('uOpacity', this.params!.opacity).f('uAlphaLock', layer.alphaLock ? 1 : 0).i('uMode', 1)
+    for (const s of spans) {
+      const st = src.get(s.key)!
+      const base = edit.snapshot(s.key)
+      gpu.bindTex(0, base?.tex ?? gpu.blank)
+      gpu.bindTex(1, st.tex)
+      setClipCtx(p, { x: s.tx * TILE, y: s.ty * TILE, w: TILE, h: TILE })
+      gpu.bindTarget(layer.editTiles!.ensure(s.tx, s.ty), s.local)
+      gpu.fullscreen()
+    }
+    this.gl.disable(this.gl.SCISSOR_TEST)
+  }
+
+  /** Smudge / wet mix on a tiled layer: assemble the dab's region into a scratch, then draw the dab into every tile it touches. */
+  private stampDirectInf(dabs: DabEx[], mix: boolean): void {
+    const gl = this.gl
+    const gpu = this.gpu
+    const layer = this.layer!
+    const store = layer.editTiles!
+    const brush = this.params!.preset
+    const w = brush.wet
+    const intense = brush.render.mode === 'intenseBlending'
+    const p = this.dabProg
+    gl.disable(gl.BLEND)
+    for (const d of dabs) {
+      // the region must cover the WHOLE dab quad (its corners reach sqrt(2) * (R + margin)), because the pass writes every texel of the quad
+      const half = Math.SQRT2 * (d.size / 2 + 1.5) + 4
+      let b: Rect = { x: d.x - half, y: d.y - half, w: 2 * half, h: 2 * half }
+      if (!mix) b = unionRect(b, { x: d.px - half, y: d.py - half, w: 2 * half, h: 2 * half }) as Rect
+      const r = intRect(b)
+      const max = this.gpu.maxTexture
+      if (r.w < 1 || r.h < 1 || r.w > max || r.h > max) continue
+      const SCR = Math.max(1024, 1 << Math.ceil(Math.log2(Math.max(r.w, r.h))))
+      if (!this.infScratch || this.infScratch.w < SCR) {
+        this.infScratch?.dispose()
+        this.infScratch = gpu.surface(SCR, SCR, store.fmt, 0)
+      }
+      const scratch = this.infScratch
+      const SIZE = scratch.w
+      this.edit!.save(r)
+      gpu.clear(scratch, { x: 0, y: 0, w: r.w, h: r.h })
+      const spans = this.tileSpans(r)
+      for (const s of spans) store.ensure(s.tx, s.ty) // allocate before any texture binding
+      for (const s of spans) {
+        const t = store.get(s.tx, s.ty)
+        if (t) gpu.blit(t, s.local, scratch, s.tx * TILE + s.local.x - r.x, s.ty * TILE + s.local.y - r.y)
+      }
+      if (mix) {
+        const from = this.loads![this.loadIdx]
+        const to = this.loads![1 - this.loadIdx]
+        const lp = this.loadProg.use()
+        gpu.bindTex(3, scratch.tex)
+        gpu.bindTex(5, from.tex)
+        const pull = Math.min(0.6, (0.02 + 0.33 * w.pull) * (intense ? 1.6 : 1) * (1 + d.dil * 0.8))
+        const refill = 0.004 + 0.25 * Math.pow(w.charge, 1.5)
+        lp.i('uSrc', 3).i('uLoad', 5).v2('uCanvas', SIZE, SIZE).v2('uSrcOrg', 0, 0).v3('uPos', d.x - r.x, d.y - r.y, d.size * 0.5)
+        lp.v4('uBrush', d.r, d.g, d.b, 1).v2('uRates', pull, refill)
+        gpu.bindTarget(to, null)
+        gpu.fullscreen()
+        this.loadIdx = 1 - this.loadIdx
+      }
+      this.setupDabState(p, mix ? 2 : 1, brush, false)
+      if (mix) {
+        p.v4('uMix', (0.25 + 0.75 * w.attack) * (intense ? 1.35 : 1) * this.params!.opacity, w.grade, intense ? 1 : 0, 0)
+        gpu.bindTex(5, this.loads![this.loadIdx].tex)
+      } else p.v4('uMix', brush.smudgeStrength, 0, 0, 0)
+      gpu.bindTex(3, scratch.tex)
+      bindClipMask(gpu, p, { x: 0, y: 0, w: TILE, h: TILE })
+      for (const s of spans) {
+        const ox = s.tx * TILE
+        const oy = s.ty * TILE
+        p.v2('uOrigin', ox, oy).v2('uSrcOff', ox - r.x, oy - r.y).v2('uSrcSize', SIZE, SIZE)
+        setClipCtx(p, { x: ox, y: oy, w: TILE, h: TILE })
+        gpu.bindTarget(store.ensure(s.tx, s.ty), null)
+        this.upload([d], 0, 1, ox, oy)
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 1)
+      }
+      this.gl.bindSampler(1, null)
+      this.gl.bindSampler(2, null)
+      this.frameDirty = unionRect(this.frameDirty, r)
+      this.liveRect = unionRect(this.liveRect, r)
+    }
+    this.endDabState()
+  }
+
+  /** Free tiles of the edit that ended up fully transparent (erase / smudge), inside the same undo step. */
+  private pruneEdited(): void {
+    const edit = this.edit
+    const store = this.layer?.editTiles
+    if (!edit || !store) return
+    for (const k of store.emptyAmong(edit.savedKeys())) edit.removeKey(k)
   }
 
   /** Combine primary + dual buffers and apply wet edge / burnt edges / threshold into C. */
@@ -399,6 +628,7 @@ export class BrushEngine {
 
   /** Per-dab sequential passes: smudge and wet mix read the layer copy in `scratch`. */
   private stampDirect(dabs: DabEx[], mix: boolean): void {
+    if (this.inf) return this.stampDirectInf(dabs, mix)
     const gl = this.gl
     const gpu = this.gpu
     const layer = this.layer!
@@ -423,7 +653,7 @@ export class BrushEngine {
         const pull = Math.min(0.6, (0.02 + 0.33 * w.pull) * (intense ? 1.6 : 1) * (1 + d.dil * 0.8))
         const refill = 0.004 + 0.25 * Math.pow(w.charge, 1.5)
         const premul = (v: number): number => v
-        lp.i('uSrc', 3).i('uLoad', 5).v2('uCanvas', this.doc.width, this.doc.height).v3('uPos', d.x, d.y, d.size * 0.5)
+        lp.i('uSrc', 3).i('uLoad', 5).v2('uCanvas', this.doc.width, this.doc.height).v2('uSrcOrg', 0, 0).v3('uPos', d.x, d.y, d.size * 0.5)
         lp.v4('uBrush', premul(d.r), premul(d.g), premul(d.b), 1).v2('uRates', pull, refill)
         gpu.bindTarget(to, null)
         gpu.fullscreen()
@@ -452,6 +682,21 @@ export class BrushEngine {
     if (!this.layer || this.kind !== 'stamp') return
     const r = this.liveRect
     if (!r) return
+    if (this.inf) {
+      for (const s of [this.sA, this.sB, this.sC]) for (const t of s.map.values()) this.gpu.clear(t)
+      if (this.directBlend) {
+        // put the pre-stroke tiles back (absent before = transparent again)
+        for (const s of this.tileSpans(r)) {
+          const snap = this.edit!.snapshot(s.key)
+          if (snap === undefined) continue
+          const t = this.layer.editTiles!.ensure(s.tx, s.ty)
+          if (snap) this.gpu.blit(snap, { x: 0, y: 0, w: TILE, h: TILE }, t, 0, 0)
+          else this.gpu.clear(t)
+        }
+      }
+      this.frameDirty = unionRect(this.frameDirty, r)
+      return
+    }
     this.gpu.clear(this.A, r)
     if (this.B) this.gpu.clear(this.B, r)
     if (this.C) this.gpu.clear(this.C, r)
@@ -463,10 +708,10 @@ export class BrushEngine {
   composeLiveTo(dst: Surface, rect: Rect): void {
     const layer = this.layer
     const gpu = this.gpu
-    if (!layer) return
+    if (!layer || this.inf) return
     const p = this.commitProg.use()
     gpu.bindTex(0, layer.surface.tex)
-    p.i('uSrc', 0).f('uDither', 0)
+    p.i('uSrc', 0).f('uDither', 0).v2('uOrigin', 0, 0)
     setStrokeUniforms(gpu, p, this.live, layer.alphaLock)
     gpu.bindTarget(dst, rect)
     gpu.fullscreen()
@@ -483,7 +728,11 @@ export class BrushEngine {
     const doc = this.doc
     let result: { layerId: string; rect: Rect; mode: PaintMode } | null = null
     if (this.kind !== 'stamp' || this.directBlend) {
+      if (this.inf && params.mode !== 'paint') this.pruneEdited()
       const dirty = this.edit?.finish() ?? null
+      if (dirty) result = { layerId: layer.id, rect: dirty, mode: params.mode }
+    } else if (rect && this.inf) {
+      const dirty = this.commitInf(params.mode === 'erase')
       if (dirty) result = { layerId: layer.id, rect: dirty, mode: params.mode }
     } else if (rect) {
       const label = params.mode === 'erase' ? 'Erase' : 'Brush stroke'
@@ -492,7 +741,7 @@ export class BrushEngine {
       gpu.blit(layer.surface, rect, doc.scratch, rect.x, rect.y)
       const p = this.commitProg.use()
       gpu.bindTex(0, doc.scratch.tex)
-      p.i('uSrc', 0).f('uDither', layer.surface.fmt === 'rgba8' ? 1 : 0)
+      p.i('uSrc', 0).f('uDither', layer.surface.fmt === 'rgba8' ? 1 : 0).v2('uOrigin', 0, 0)
       setStrokeUniforms(gpu, p, this.live, layer.alphaLock)
       gpu.bindTarget(layer.surface, rect)
       gpu.fullscreen()
@@ -505,7 +754,41 @@ export class BrushEngine {
     return result
   }
 
+  /** Bake the sparse stroke buffer into the layer tiles (one undo step). Returns the dirty rect. */
+  private commitInf(erase: boolean): Rect | null {
+    const layer = this.layer!
+    const gpu = this.gpu
+    const store = layer.editTiles!
+    const src = this.needFinal ? this.sC : this.sA
+    const edit = this.doc.beginPixelEdit(layer, erase ? 'Erase' : 'Brush stroke')
+    const tmp = (this.tileTmp ??= gpu.surface(TILE, TILE, store.fmt, 0))
+    const live = this.live
+    for (const [key, st] of src.map) {
+      const cur = store.getKey(key)
+      if (!cur && erase) continue
+      edit.saveKey(key)
+      const target = store.ensureKey(key)
+      if (cur) gpu.blit(cur, { x: 0, y: 0, w: TILE, h: TILE }, tmp, 0, 0)
+      else if (store instanceof MaskTileStore) store.paintFill(tmp)
+      else gpu.clear(tmp)
+      const p = this.commitProg.use()
+      gpu.bindTex(0, tmp.tex)
+      p.i('uSrc', 0).f('uDither', store.fmt === 'rgba8' ? 1 : 0).v2('uOrigin', ditherOrigin(tileKeyX(key)), ditherOrigin(tileKeyY(key)))
+      setStrokeUniforms(gpu, p, live, layer.alphaLock, st.tex, { x: tileKeyX(key) * TILE, y: tileKeyY(key) * TILE, w: TILE, h: TILE })
+      gpu.bindTarget(target, null)
+      gpu.fullscreen()
+    }
+    if (erase) for (const k of store.emptyAmong(edit.savedKeys())) edit.removeKey(k)
+    return edit.finish()
+  }
+
   private clearBuffers(rect: Rect | null): void {
+    if (this.inf) {
+      this.sA.clear()
+      this.sB.clear()
+      this.sC.clear()
+      return
+    }
     this.gpu.clear(this.A, rect)
     if (this.B) this.gpu.clear(this.B, rect)
     if (this.C) this.gpu.clear(this.C, rect)
@@ -527,6 +810,7 @@ export class BrushEngine {
   }
 
   private reset(): void {
+    this.inf = false
     this.layer = null
     this.params = null
     this.edit = null
@@ -537,6 +821,13 @@ export class BrushEngine {
   }
 
   dispose(): void {
+    this.sA.clear()
+    this.sB.clear()
+    this.sC.clear()
+    this.pool.dispose()
+    this.dummy.dispose()
+    this.infScratch?.dispose()
+    this.tileTmp?.dispose()
     this.A.dispose()
     this.B?.dispose()
     this.C?.dispose()

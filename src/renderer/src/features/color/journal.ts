@@ -1,5 +1,6 @@
 import type { Document } from '../../doc/document'
 import type { GalleryApi } from '../../../../preload/gallery'
+import { TILE, tileCount, tileKey, tilesIn } from '../../core/tiles'
 import { encodeRect } from '../../io/asyncSave'
 import { decodeImage, registerBwkExtension } from '../../io/bwk'
 
@@ -85,6 +86,8 @@ export class Journal {
   private states = new WeakMap<Document, State>()
   /** journal patches larger than this fraction of the canvas fall back to a quick full save */
   static MAX_AREA = 0.25
+  /** infinite canvas: a stroke touching more tiles than this falls back to a quick incremental save */
+  static MAX_TILES = 48
   stats = { appended: 0, quickSaves: 0, bytes: 0 }
 
   constructor(
@@ -113,6 +116,7 @@ export class Journal {
     const layer = e.layerId ? doc.getLayer(e.layerId) : undefined
     const r = e.dirtyRect
     const paintType = e.type === 'stroke' || e.type === 'erase' || e.type === 'smudge'
+    if (layer?.tiles && paintType && r && tileCount(r) <= Journal.MAX_TILES) return this.onCommitTiles(doc, st, e, layer.id, layer.tiles, r)
     if (!paintType || !layer || layer.isGroup || layer.editingMask || !r || r.w * r.h > doc.width * doc.height * Journal.MAX_AREA) {
       this.stats.quickSaves++
       this.quickSave(doc)
@@ -138,6 +142,49 @@ export class Journal {
             await this.api().append(st.id + '.jrn', entry)
             this.stats.appended++
             this.stats.bytes += entry.length
+          } catch (err) {
+            console.error('[journal] append failed', err)
+            this.quickSave(doc)
+          }
+        })
+        return st.chain
+      },
+      (err) => {
+        if (!doc.disposed) {
+          console.error('[journal] patch failed', err)
+          this.quickSave(doc)
+        }
+      }
+    )
+    void done.finally(() => void st.pending--)
+  }
+
+  /**
+   * Infinite canvas: one patch per touched 512 px tile (header x,y = tile origin in document space, w = h = TILE). A tile that no longer
+   * exists (erased, undone) is journaled as an empty PNG, which replay turns into "free this tile".
+   */
+  private onCommitTiles(doc: Document, st: State, e: { seq: number }, layerId: string, store: NonNullable<import('../../doc/layer').Layer['tiles']>, r: { x: number; y: number; w: number; h: number }): void {
+    st.pending++
+    st.lastSeq = Math.max(st.lastSeq, e.seq)
+    const gen = genOf(doc)
+    const check = (): void => {
+      if (doc.disposed) throw new Error('document disposed')
+    }
+    // the GPU readbacks are issued synchronously (in-order with the commit); only the file appends are queued
+    const jobs = tilesIn(r).map(({ tx, ty }) => {
+      const s = store.get(tx, ty)
+      const png = s ? encodeRect(doc.gpu, s, 0, 0, TILE, TILE, check) : Promise.resolve(new Uint8Array(0))
+      return png.then((bytes) => packEntry({ gen, seq: e.seq, layer: layerId, x: tx * TILE, y: ty * TILE, w: TILE, h: TILE }, bytes))
+    })
+    const done = Promise.all(jobs).then(
+      (entries) => {
+        st.chain = st.chain.then(async () => {
+          try {
+            for (const entry of entries) {
+              await this.api().append(st.id + '.jrn', entry)
+              this.stats.appended++
+              this.stats.bytes += entry.length
+            }
           } catch (err) {
             console.error('[journal] append failed', err)
             this.quickSave(doc)
@@ -193,6 +240,19 @@ export class Journal {
         const layer = doc.getLayer(h.layer)
         if (!layer || layer.isGroup) continue
         try {
+          if (layer.tiles) {
+            const tx = Math.round(h.x / TILE)
+            const ty = Math.round(h.y / TILE)
+            if (!en.png.length) layer.tiles.free(tileKey(tx, ty))
+            else {
+              const img = await decodeImage(en.png)
+              if (img.width !== TILE || img.height !== TILE) continue
+              layer.tiles.upload(tx, ty, img.data)
+            }
+            applied++
+            maxSeq = Math.max(maxSeq, h.seq)
+            continue
+          }
           const img = await decodeImage(en.png)
           if (img.width !== h.w || img.height !== h.h) continue
           doc.gpu.uploadRGBA8(layer.pixels, h.x, h.y, h.w, h.h, img.data)

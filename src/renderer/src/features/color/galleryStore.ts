@@ -21,6 +21,8 @@ export interface GalleryItem {
   name: string
   width: number
   height: number
+  /** infinite canvas: width / height are the size of the painted content, not a canvas size */
+  infinite?: boolean
   layers: number
   created: number
   modified: number
@@ -63,6 +65,13 @@ const QUICK_MS = 300
 const RETRY_MS = 900
 
 /** Write a big file to the gallery in ~1 MB IPC pieces (one 40 MB message would block the UI for a frame or more). */
+/** Gallery card size: the canvas of a fixed document, the content bounds (tile granularity) of an infinite one. */
+export function itemSize(doc: Document): { width: number; height: number; infinite?: boolean } {
+  if (!doc.isInfinite) return { width: doc.width, height: doc.height }
+  const b = doc.contentBounds()
+  return { width: b ? Math.round(b.w) : 0, height: b ? Math.round(b.h) : 0, infinite: true }
+}
+
 export async function writeChunked(name: string, data: Uint8Array): Promise<void> {
   const CH = 1 << 20
   if (data.length <= CH) {
@@ -220,8 +229,7 @@ export class GalleryStore {
     this.items.push({
       id,
       name: meta.name || doc.name || t('core.common.untitled'),
-      width: doc.width,
-      height: doc.height,
+      ...itemSize(doc),
       layers: doc.layers.filter((l) => !(l as any).isGroup).length,
       created: now,
       modified: now,
@@ -287,13 +295,25 @@ export class GalleryStore {
     this.dirty.delete(doc)
     const seq = doc.commitSeq
     try {
-      const r = await saveBwkEx(doc, this.app.compositor, {}, { background, recompose: !background })
-      await writeChunked(id + '.bwk', r.bytes)
+      let r: Awaited<ReturnType<typeof saveBwkEx>>
+      if (doc.isInfinite) {
+        // streamed straight into the file through the main process: a huge document is never one buffer in the renderer
+        const wid = await api().wbegin(id + '.bwk')
+        try {
+          r = await saveBwkEx(doc, this.app.compositor, {}, { background, recompose: !background, sink: { write: async (c) => void (await api().wchunk(wid, c)) } })
+          await api().wend(wid)
+        } catch (e) {
+          await api().wabort(wid)
+          throw e
+        }
+      } else {
+        r = await saveBwkEx(doc, this.app.compositor, {}, { background, recompose: !background })
+        await writeChunked(id + '.bwk', r.bytes)
+      }
       await api().write(id + '.png', r.thumbnail)
       this.dropThumb(id)
       item.modified = Date.now()
-      item.width = doc.width
-      item.height = doc.height
+      Object.assign(item, itemSize(doc))
       item.layers = doc.layers.filter((l) => !(l as any).isGroup).length
       // a brand-new artwork must be in index.json before anything else can happen (a kill within the 300 ms index debounce
       // would orphan the file and the journal that protects it)
@@ -397,7 +417,17 @@ export class GalleryStore {
       this.app.notify(t('gallery.error.filesMissing'))
       return false
     }
-    const doc = await loadBwk(bytes, this.app.gpu)
+    let doc: Document
+    try {
+      doc = await loadBwk(bytes, this.app.gpu)
+    } catch (e) {
+      // the current file is unreadable: fall back to the previous version kept by the verified-save step (<id>.bwk~)
+      const prev = await api().read(id + '.bwk~')
+      if (!prev) throw e
+      console.warn('[gallery] ' + id + '.bwk is unreadable, opening the previous version', e)
+      doc = await loadBwk(prev, this.app.gpu)
+      this.app.notify(t('gallery.recoveredPrevious'))
+    }
     doc.name = item.name
     this.docIds.set(doc, id)
     this.lastOpened = id
@@ -486,6 +516,7 @@ export class GalleryStore {
     this.items = this.items.filter((i) => i.id !== id)
     this.dropThumb(id)
     await api().remove(id + '.bwk')
+    await api().remove(id + '.bwk~')
     await api().remove(id + '.png')
     this.saveIndex()
   }

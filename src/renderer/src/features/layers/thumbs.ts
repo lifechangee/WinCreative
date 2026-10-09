@@ -3,6 +3,27 @@ import type { Layer } from '../../doc/layer'
 import type { Surface } from '../../gl/gpu'
 import { FS_VERT } from '../../gl/shaders'
 import { THUMB_FS } from '../../gl/layerShaders'
+import { TILE, tileKeyX, tileKeyY, unionBounds } from '../../core/tiles'
+import type { Rect } from '../../core/types'
+
+/** One layer tile box-filtered into the thumbnail (pixels whose centre lies inside the tile only). */
+const TILE_THUMB_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uTile;
+uniform float uK;     // output px per document px
+uniform vec2 uOff;    // tile origin relative to the thumbnail origin (document px)
+out vec4 o;
+void main(){
+  vec2 d = gl_FragCoord.xy / uK - uOff;
+  if (d.x < 0.0 || d.y < 0.0 || d.x >= 512.0 || d.y >= 512.0) discard;
+  vec2 foot = vec2(1.0 / uK) / 512.0;
+  vec4 acc = vec4(0.0);
+  for (int j = 0; j < 8; j++) for (int i = 0; i < 8; i++) {
+    vec2 e = (vec2(float(i), float(j)) + 0.5) / 8.0 - 0.5;
+    acc += texture(uTile, d / 512.0 + e * foot);
+  }
+  o = acc / 64.0;
+}`
 
 const THUMB = 56
 
@@ -68,13 +89,18 @@ export class Thumbs {
       if (l.isGroup) continue
       const e = this.entries.get(l.id)
       if (!e) continue
-      if (e.dirtyP && budget > 0) {
+      if (e.dirtyP && budget > 0 && l.tiles) {
+        this.renderTiles(l, e.pixels)
+        e.dirtyP = false
+        budget--
+      } else if (e.dirtyP && budget > 0) {
         this.render(l.pixels, e.pixels)
         e.dirtyP = false
         budget--
       }
       if (e.dirtyM && l.mask && budget > 0) {
-        this.render(l.mask, e.mask)
+        if (l.maskTiles) this.renderMaskTiles(l, e.mask)
+        else this.render(l.mask, e.mask)
         e.dirtyM = false
         budget--
       }
@@ -85,6 +111,66 @@ export class Thumbs {
     })
     if (pending) this.schedule()
     this.onUpdate?.()
+  }
+
+  /** Infinite canvas: thumbnail of the whole painted area (tile by tile, so content of any extent fits). */
+  private renderTiles(l: Layer, canvas: HTMLCanvasElement): void {
+    this.renderStore(l.tiles!, l.tiles!.tightBounds(), canvas, null)
+  }
+
+  /** Infinite mask thumbnail over the layer's content area; tiles the mask does not have show its fill value. */
+  private renderMaskTiles(l: Layer, canvas: HTMLCanvasElement): void {
+    const ms = l.maskTiles!
+    const b = unionBounds(l.tiles?.bounds() ?? null, ms.bounds())
+    this.renderStore(ms, b, canvas, l.maskFill)
+  }
+
+  /** Box-filter the tiles of `store` into a 56 px thumbnail of `b`. `bg`: opaque grey level behind missing tiles (masks), null = transparent. */
+  private renderStore(store: NonNullable<Layer['tiles']>, b: Rect | null, canvas: HTMLCanvasElement, bg: 0 | 1 | null): void {
+    const gpu = this.app.gpu
+    const gl = gpu.gl
+    if (!b) {
+      canvas.width = 1
+      canvas.height = 1
+      const c = canvas.getContext('2d')!
+      c.clearRect(0, 0, 1, 1)
+      if (bg !== null) {
+        c.fillStyle = bg ? '#fff' : '#000'
+        c.fillRect(0, 0, 1, 1)
+      }
+      return
+    }
+    const k = Math.min(1, THUMB / Math.max(b.w, b.h))
+    const tw = Math.max(1, Math.round(b.w * k))
+    const th = Math.max(1, Math.round(b.h * k))
+    const out = gpu.surface(tw, th, 'rgba8')
+    gpu.bindTarget(out, null)
+    gl.clearColor(bg ?? 0, bg ?? 0, bg ?? 0, bg === null ? 0 : 1)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    gl.clearColor(0, 0, 0, 0)
+    gl.disable(gl.BLEND)
+    const keys = [...store.keys()]
+    const tiles = keys.map((key) => ({ key, s: store.getKey(key)! })).filter((t2) => t2.s)
+    const p = gpu.program('layer-thumb-tile', FS_VERT, TILE_THUMB_FS).use()
+    for (const t2 of tiles) {
+      const ox = tileKeyX(t2.key) * TILE - b.x
+      const oy = tileKeyY(t2.key) * TILE - b.y
+      const x0 = Math.max(0, Math.floor(ox * k))
+      const y0 = Math.max(0, Math.floor(oy * k))
+      const x1 = Math.min(tw, Math.ceil((ox + TILE) * k))
+      const y1 = Math.min(th, Math.ceil((oy + TILE) * k))
+      if (x1 <= x0 || y1 <= y0) continue
+      gpu.bindTex(0, t2.s.tex)
+      p.i('uTile', 0).f('uK', k).v2('uOff', ox, oy)
+      gpu.bindTarget(out, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+      gpu.fullscreen()
+    }
+    gl.disable(gl.SCISSOR_TEST)
+    const px = gpu.readRGBA8(out, { x: 0, y: 0, w: tw, h: th })
+    out.dispose()
+    canvas.width = tw
+    canvas.height = th
+    canvas.getContext('2d')!.putImageData(new ImageData(px as unknown as Uint8ClampedArray<ArrayBuffer>, tw, th), 0, 0)
   }
 
   private render(src: Surface, canvas: HTMLCanvasElement): void {

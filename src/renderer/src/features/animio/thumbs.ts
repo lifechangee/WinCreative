@@ -16,15 +16,16 @@ export class ThumbMaker {
   /** Draw `roots` (bottom->top) onto `cv`, fitting the canvas aspect into maxW x maxH device pixels. */
   draw(cv: HTMLCanvasElement, roots: Layer[], maxW = 176, maxH = 140): void {
     const doc = this.app.doc
-    const k = Math.min(maxW / doc.width, maxH / doc.height, 1)
-    const w = Math.max(2, Math.round(doc.width * k))
-    const h = Math.max(2, Math.round(doc.height * k))
+    const fr = this.fr()
+    const src = fr.renderFull(roots) // (infinite canvas: the frame area, so read its size AFTER rendering)
+    const k = Math.min(maxW / fr.width, maxH / fr.height, 1)
+    const w = Math.max(2, Math.round(fr.width * k))
+    const h = Math.max(2, Math.round(fr.height * k))
     const gpu = this.app.gpu
     if (!this.small || this.small.w !== w || this.small.h !== h) {
       this.small?.dispose()
       this.small = gpu.surface(w, h, 'rgba8')
     }
-    const src = this.fr().renderFull(roots)
     const bg = doc.background
     resample(gpu, src, this.small, { paper: bg.visible ? bg.color : [1, 1, 1] })
     const px = gpu.readRGBA8(this.small, { x: 0, y: 0, w, h })

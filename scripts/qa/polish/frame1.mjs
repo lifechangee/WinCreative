@@ -1,0 +1,18 @@
+export default async ({ page, shot, ev, newDoc }) => {
+  await newDoc(page, 'fixed', 1600, 1200)
+  await ev(() => { const a = window.brushwork_app; a.state.setTool('brush'); a.state.settings.size = 40 })
+  await page.click('.bw-frame-btn')
+  await shot('frame-panel-empty')
+  await page.click('.fr-chip[data-preset=reels]')
+  await shot('frame-panel-on')
+  await page.keyboard.press('Escape')
+  await ev(() => window.brushwork_app.fitContent())
+  await shot('frame-on')
+  await page.click('.bw-frame-btn', { button: 'right' })
+  await page.click('.fr-acts .btn')
+  await ev(() => window.brushwork_app.canvas.parentElement.click())
+  await shot('frame-edit')
+  await page.keyboard.press('Escape')
+  await page.click('.bw-frame-btn')
+  await shot('frame-off')
+}

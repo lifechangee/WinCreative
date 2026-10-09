@@ -88,3 +88,19 @@
 /* six top-bar tabs: keep the centred document title clear of the (longer) Russian tab row */
 .tb-left .tb-btn { padding-left: 10px; padding-right: 10px; }
 @media (max-width: 1500px) { .tb-title { left: calc(50% + 44px); max-width: 24vw; overflow: hidden; text-overflow: ellipsis; } }
+
+/* language variants */
+.tle-seg { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.tle-seg-btn { flex: 1; background: var(--panel2); color: var(--text); border: 0; border-right: 1px solid var(--line); padding: 6px 10px; cursor: pointer; font-size: 12px; }
+.tle-seg-btn:last-child { border-right: 0; }
+.tle-seg-btn.on { background: var(--accent); color: #fff; font-weight: 600; }
+.tle.cmp .tle-main, .tle.cmp .tle-tl { display: none; }
+.tle-cmp { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #141416; }
+.tle-cmp-grid { flex: 1; min-height: 0; display: flex; gap: 12px; padding: 12px; justify-content: center; }
+.tle-cmp-pane { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.tle-cmp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 13px; }
+.tle-cmp-pane .tle-frame { flex: 1; min-height: 0; width: 100%; height: auto; position: relative; overflow: hidden; }
+.tle-cmp-pane .tle-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.tle-cmp-ctl { padding: 8px 14px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.tle-cmp-slider { width: 100%; accent-color: var(--accent); }
+.tle-cmp-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

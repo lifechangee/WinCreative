@@ -6,6 +6,7 @@ import type { UIContext } from '../../ui/registry'
 import { AnimAssist } from './animation'
 import { openAnimExport } from './animExport'
 import type { PlayMode } from './schedule'
+import { requireFrame } from '../frame/needFrame'
 import { ThumbMaker } from './thumbs'
 import { btn, ensureStyles, numberInput, select } from './ui'
 
@@ -144,8 +145,12 @@ export function installAnimationUi(app: App, ui: UIContext, hooks: StripHooks = 
       group: 'canvas',
       label: anim.enabled ? tk('animio.menu.anim.on') : tk('animio.menu.anim.off'),
       run: () => {
-        if (!anim.enabled) hooks.onEnable?.()
-        anim.setEnabled(!anim.enabled)
+        if (anim.enabled) return anim.setEnabled(false)
+        // infinite canvas: Animation Assist works inside the frame (offers to create one)
+        requireFrame(app, 'anim', () => {
+          hooks.onEnable?.()
+          anim.setEnabled(true)
+        })
       }
     })
   anim.events.on('change', refreshMenu)

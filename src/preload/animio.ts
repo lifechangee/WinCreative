@@ -1,23 +1,23 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 /** Preload bridge for the animio feature module (time-lapse store, ffmpeg jobs, folder writes). */
-type Idx = { o: number; l: number; d: number; t?: string; s?: number }
+type Idx = { o: number; l: number; d: number; t?: string; s?: number; r?: number[]; v?: string[]; g?: number }
 const inv = (ch: string, ...a: unknown[]): Promise<any> => ipcRenderer.invoke(ch, ...a)
 
 const api = {
   tl: {
     start: (id: string): Promise<void> => inv('tl:start', id),
-    append: (id: string, bytes: Uint8Array, dtMs: number, meta?: { t?: string; s?: number }): Promise<{ count: number; bytes: number }> => inv('tl:append', id, bytes, dtMs, meta),
+    append: (id: string, bytes: Uint8Array, dtMs: number, meta?: { t?: string; s?: number; r?: number[]; v?: string[]; g?: number }): Promise<{ count: number; bytes: number }> => inv('tl:append', id, bytes, dtMs, meta),
     info: (id: string): Promise<{ count: number; bytes: number } | null> => inv('tl:info', id),
     frame: (id: string, i: number): Promise<Uint8Array | null> => inv('tl:frame', id, i),
     pack: (id: string): Promise<{ data: Uint8Array; index: Idx[] }> => inv('tl:pack', id),
     packInfo: (id: string): Promise<{ offset: number; index: Idx[]; gen: number }> => inv('tl:packInfo', id),
     packRange: (id: string, from: number, len: number): Promise<Uint8Array> => inv('tl:packRange', id, from, len),
     load: (id: string, data: Uint8Array, index: Idx[]): Promise<{ count: number; bytes: number }> => inv('tl:load', id, data, index),
-    decimate: (id: string): Promise<{ count: number; bytes: number }> => inv('tl:decimate', id),
+    decimate: (id: string): Promise<{ count: number; bytes: number; survivors: number[] }> => inv('tl:decimate', id),
     close: (id: string): Promise<void> => inv('tl:close', id),
     index: (id: string): Promise<number[]> => inv('tl:index', id),
-    tags: (id: string): Promise<{ d: number; t?: string; s?: number }[]> => inv('tl:tags', id),
+    tags: (id: string): Promise<{ d: number; t?: string; s?: number; r?: number[]; v?: string[]; g?: number }[]> => inv('tl:tags', id),
     export: (o: {
       id: string
       indices: number[]

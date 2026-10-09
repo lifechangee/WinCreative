@@ -94,6 +94,8 @@ const dict: Record<string, string> = {
   'layers.options.fillLayer': 'Fill Layer',
   'layers.options.clear': 'Clear',
   'layers.options.clippingMask': 'Clipping Mask',
+  'layers.options.clippingOnGroup': 'A clipping mask needs a layer below it: a group cannot be the base',
+  'layers.options.clippingOnLangRow': 'A clipping mask needs a layer below it: a language layer cannot be the base',
   'layers.options.invert': 'Invert',
   'layers.options.drawingAssist': 'Drawing Assist',
 

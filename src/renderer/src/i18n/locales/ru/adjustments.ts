@@ -4,6 +4,10 @@ const dict: Record<string, string> = {
 
   'adjustments.ui.layerHidden': 'Слой скрыт',
 
+  'adjustments.ui.limit.frame': 'Только в пределах рамки',
+  'adjustments.ui.limit.view': 'Только видимая область',
+  'adjustments.ui.limit.viewAll': 'Просмотр: рабочая область, применение: весь слой',
+  'adjustments.ui.limit.tip': 'На бесконечном холсте тяжёлые фильтры работают в рамке, а без рамки — в видимой области',
   'adjustments.ui.nothingToApply': 'Нечего применять',
 
   'adjustments.ui.layer': 'Слой',

@@ -308,6 +308,20 @@ export async function runTutorialSelfTest(app: App): Promise<void> {
         apply: () => tap('Enter', 'Enter'),
         deselect: () => tap('d', 'KeyD', { ctrlKey: true })
       },
+      smart: {
+        menu: () => clickMenu(3),
+        open: async () => {
+          if (!q('.popover .menu-item')) await clickMenu(3)
+          menuItem(/smart selection/i)?.click()
+        },
+        click: () => stroke([[c.x, c.y]]),
+        remove: () => stroke([[c.x + 330, c.y + 120]], { alt: true }),
+        cut: async () => {
+          const ss = (window as any).brushwork_smartselect.c
+          while (ss.pending > 0 || ss.busy) await sleep(60) // like a user, wait until the selection has settled
+          qa('.ss-bar .sx-row')[2]?.querySelector('button')?.click()
+        }
+      },
       adjust: {
         menu: () => clickMenu(2),
         pick: () => menuItem(/gaussian blur/i)?.click(),
@@ -352,6 +366,24 @@ export async function runTutorialSelfTest(app: App): Promise<void> {
         export: async () => {
           q('.modal-back')?.remove()
           await clickMenu(1, /export time-lapse/i)
+        }
+      },
+      frame: {
+        make: async () => {
+          q('.bw-frame-btn')!.click() // no frame yet: the button opens the presets
+          await sleep(120)
+          q('.fr-chip[data-preset="reels"]')!.click()
+        },
+        draw: () => stroke(line(c.x - 330, c.y, c.x + 330, c.y + 20, 24)),
+        toggle: () => q('.bw-frame-btn')!.click()
+      },
+      langs: {
+        layer: () => void (window as any).brushwork_lang.newLayer('Months'),
+        write1: () => stroke(line(c.x - 200, c.y - 60, c.x + 100, c.y - 60, 22)),
+        switch: () => (window as any).brushwork_lang.setView('ru'),
+        write2: () => stroke(line(c.x - 200, c.y + 20, c.x + 60, c.y + 20, 22)),
+        video: async () => {
+          qa('.tb-left .tb-btn')[5].click()
         }
       },
       gallery: {
@@ -409,7 +441,7 @@ export async function runTutorialSelfTest(app: App): Promise<void> {
           check(`lesson ${lesson.id}.${step.id}: coach clear of target`, !overlap)
         }
         // it must not sit on top of a menu / panel the user has to pick from
-        for (const pop of qa('.popover, .sx-bar, .adj-bar, .qm')) {
+        for (const pop of qa('.popover, .sx-bar, .ss-bar, .adj-bar, .qm')) {
           if (pop.style.display === 'none') continue
           const pr = pop.getBoundingClientRect()
           const area = Math.max(0, Math.min(cr.right, pr.right) - Math.max(cr.left, pr.left)) * Math.max(0, Math.min(cr.bottom, pr.bottom) - Math.max(cr.top, pr.top))

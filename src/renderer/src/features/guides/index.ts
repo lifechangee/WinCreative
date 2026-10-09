@@ -1,6 +1,7 @@
 import type { App } from '../../app/app'
 import { t, tk } from '../../i18n'
 import { registerBwkExtension } from '../../io/bwk'
+import { viewportRect } from '../frame/workRect'
 import { registerMenuItem } from '../../ui/registry'
 import { GuideManager } from './guideManager'
 import { buildGuidePanel } from './guidePanel'
@@ -21,7 +22,7 @@ export function install(app: App, ui: unknown): void {
   const mgr = new GuideManager(app, overlay)
   const guidePanel = buildGuidePanel(app, mgr)
   // Transform snapping: grid lines / symmetry axes / vanishing points (read by selectxform TransformSession.targets)
-  ;(app as unknown as { guides: unknown }).guides = { snapTargets: () => snapTargetsFor(mgr.state, app.doc.width, app.doc.height) }
+  ;(app as unknown as { guides: unknown }).guides = { snapTargets: () => snapTargetsFor(mgr.state, app.doc.width, app.doc.height, app.doc.isInfinite ? viewportRect(app) : undefined) }
   const qs = new QuickShape(app, overlay, mgr)
   const qsPanel = buildQuickShapePanel(app)
 

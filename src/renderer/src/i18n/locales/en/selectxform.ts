@@ -190,5 +190,9 @@ const dict: Record<string, string> = {
   'selectxform.bar.layersOnly_few': '{count} layers',
   'selectxform.bar.layersOnly_many': '{count} layers',
   'selectxform.bar.layersOnly_other': '{count} layers',
+
+  'selectxform.limitedWindow': 'Selection limited to {n} px',
+  'selectxform.limitedWork': 'Selection limited to the frame / visible area',
+  'selectxform.xform.tooBig': 'Transform area too large for this GPU',
 }
 export default dict

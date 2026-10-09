@@ -9,10 +9,13 @@ import { classifyTwoFinger, isPinchTogether } from '../features/layers/rowGestur
 import { h, icon } from './dom'
 import type { UIContext } from './registry'
 import { t, tk } from '../i18n'
+import { ensureLangStyles, langSwitcher, openLanguagesDialog, openNewLanguageLayerDialog } from '../features/langvariants/ui'
+import { filledLangs } from '../features/langvariants/ops'
+import { copyCell } from '../features/langvariants/ops'
 
 const CSS = `
 .lp-top{display:flex;gap:4px;align-items:center;padding:2px 2px 6px;flex-wrap:wrap}
-.lp-top .grow{flex:1;color:var(--dim);font-size:11px;text-align:right}
+.lp-top .grow{flex:1;color:var(--dim);font-size:11px;text-align:right;white-space:nowrap}
 .lp-btn{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:4px 8px;cursor:pointer;font-size:12px}
 .lp-btn:hover{border-color:var(--accent)}
 .lp-multi{display:flex;gap:4px;padding:4px;margin-bottom:4px;background:#2c3a55;border-radius:8px;align-items:center;font-size:12px}
@@ -58,7 +61,7 @@ function ensureStyles(): void {
   document.head.append(h('style', { text: CSS }))
 }
 
-type View = { kind: 'list' } | { kind: 'options'; id: string } | { kind: 'blend'; id: string }
+type View = { kind: 'list' } | { kind: 'options'; id: string } | { kind: 'blend'; id: string } | { kind: 'langs' }
 
 export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void {
   ensureStyles()
@@ -90,8 +93,8 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
   }
 
   // ------------------------------------------------------------ helpers
-  const menuItem = (label: string, fn: () => void, o: { on?: boolean; disabled?: boolean; danger?: boolean } = {}): HTMLElement =>
-    h('button', { class: 'menu-item' + (o.on ? ' on' : ''), disabled: !!o.disabled, onclick: fn, style: o.danger ? 'color:#ff8080' : '' }, h('span', { text: label }))
+  const menuItem = (label: string, fn: () => void, o: { on?: boolean; disabled?: boolean; danger?: boolean; title?: string } = {}): HTMLElement =>
+    h('button', { class: 'menu-item' + (o.on ? ' on' : ''), disabled: !!o.disabled, onclick: fn, title: o.title ?? '', style: o.danger ? 'color:#ff8080' : '' }, h('span', { text: label }))
   const btn = (text: string | SVGElement, title: string, fn: () => void, cls = 'lp-btn'): HTMLElement => h('button', { class: cls, title, onclick: fn }, typeof text === 'string' ? text : text)
 
   const opacityRow = (l: Layer, label = t('layers.options.opacity')): HTMLElement => {
@@ -139,9 +142,15 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
       btn(t('layers.panel.groupBtn'), t('layers.panel.group'), act.newGroup),
       btn(t('layers.panel.mergeBtn'), t('layers.panel.merge'), act.mergeSmart),
       btn(t('layers.panel.flattenBtn'), t('layers.panel.flatten'), act.flatten),
+      btn(t('langs.panel.newBtn'), t('langs.panel.newTip'), () => openNewLanguageLayerDialog(app, ctx.toast)),
       h('span', { class: 'grow', text: t('layers.panel.layerCount', { n: doc.paintLayerCount, max: doc.maxLayers }) })
     )
     root.append(top)
+    if (doc.hasLangLayers) {
+      ensureLangStyles()
+      const more = btn('\u22ef', t('langs.switcher.more'), () => go({ kind: 'langs' }))
+      root.append(h('div', { class: 'lg-bar' }, langSwitcher(doc), more))
+    }
     if (multi)
       root.append(
         h('div', { class: 'lp-multi' }, h('span', { text: t('layers.panel.selected', { count: sel.size }), style: 'flex:1' }), btn(t('layers.panel.groupBtn'), t('layers.panel.groupSelected'), act.newGroup), btn(t('layers.panel.mergeBtn'), t('layers.panel.mergeSelected'), act.mergeSelected), btn(t('core.common.delete'), t('layers.panel.deleteSelected'), () => act.remove()))
@@ -150,7 +159,7 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
     for (const { layer: l, depth } of displayRows(layers)) list.append(buildRow(l, depth, sel))
     root.append(list)
 
-    const act1 = doc.activeLayer
+    const act1 = doc.getLayer(doc.activeId) ?? doc.activeLayer // language layer: the ROW's opacity / blend (applies to every language)
     if (act1) {
       root.append(h('div', { class: 'layer-props' }, opacityRow(act1), blendRow(act1)))
     }
@@ -171,11 +180,11 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
   }
 
   const buildRow = (l: Layer, depth: number, sel: Set<string>): HTMLElement => {
-    const isActive = l.id === doc.activeId
+    const isActive = l.id === doc.activeId || (l.langSet && doc.getLayer(doc.activeId)?.parentId === l.id)
     const kids = l.isGroup ? doc.childrenOf(l.id) : []
     const row = h('div', { class: ['layer-row', isActive ? 'sel' : '', !isActive && sel.has(l.id) ? 'multi' : '', l.clipping ? 'clip' : '', l.isGroup ? 'group' : '', l.visible ? '' : 'hidden', swipedId === l.id ? 'swiped' : ''].filter(Boolean).join(' '), style: `margin-left:${depth * 14}px` })
     row.dataset.id = l.id
-    if (l.isGroup)
+    if (l.isGroup && !l.langSet)
       row.append(
         h('button', {
           class: 'chev',
@@ -189,7 +198,8 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
         })
       )
     // thumbnail (click -> layer pixels when the mask was being edited)
-    const th = l.isGroup ? h('div', { class: 'lthumb-box', title: t('layers.panel.groupTitle', { count: kids.length }) }, icon('layers', 20)) : thumbs.canvas(l, false)
+    const curCell = l.langSet ? doc.cellOf(l.id, doc.viewLang) : undefined
+    const th = curCell ? thumbs.canvas(curCell, false) : l.isGroup ? h('div', { class: 'lthumb-box', title: l.langSet ? t('langs.row.title') : t('layers.panel.groupTitle', { count: kids.length }) }, icon('layers', 20)) : thumbs.canvas(l, false)
     if (!l.isGroup) {
       th.title = l.clipping ? t('layers.panel.clippedBelow') : ''
       th.onclick = (e) => {
@@ -208,11 +218,27 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
     const sub = h('div', { class: 'sub' })
     if (l.blendMode !== 'normal' && !(l.isGroup && l.passThrough)) sub.append(h('span', { text: blendLabel(l.blendMode) }))
     if (l.opacity < 0.995) sub.append(h('span', { text: Math.round(l.opacity * 100) + '%' }))
-    if (l.isGroup && l.passThrough) sub.append(h('span', { text: t('layers.panel.passThrough') }))
+    if (l.isGroup && l.passThrough && !l.langSet) sub.append(h('span', { text: t('layers.panel.passThrough') }))
     if (l.alphaLock) sub.append(h('span', { class: 'flag', text: t('layers.panel.alphaLock'), title: t('layers.panel.alphaLockTitle') }))
     if (l.reference) sub.append(h('span', { class: 'flag', text: t('layers.panel.reference'), title: t('layers.panel.referenceTitle') }))
     if (l.drawingAssist) sub.append(h('span', { class: 'flag', text: t('layers.panel.assist'), title: t('layers.panel.assistTitle') }))
-    row.append(h('div', { class: 'meta' }, name, sub))
+    const meta = h('div', { class: 'meta' }, name, sub)
+    if (l.langSet) {
+      const full = filledLangs(doc, l.id)
+      const chips = h('div', { class: 'lg-chips' })
+      for (const lg of doc.langs) {
+        const chip = h('button', { class: 'lg-chip' + (full.has(lg.code) ? ' full' : '') + (doc.viewLang === lg.code ? ' cur' : ''), text: lg.code.toUpperCase(), title: t(full.has(lg.code) ? 'langs.chip.filled' : 'langs.chip.empty', { name: lg.name }) })
+        chip.addEventListener('pointerdown', (e) => e.stopPropagation())
+        chip.addEventListener('click', (e) => {
+          e.stopPropagation()
+          doc.setViewLang(lg.code)
+          doc.setActive(l.id)
+        })
+        chips.append(chip)
+      }
+      meta.append(chips)
+    }
+    row.append(meta)
     if (l.mask) {
       const mc = thumbs.canvas(l, true)
       mc.classList.add('maskt')
@@ -516,7 +542,7 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
     wrap.append(h('div', { class: 'row' }, h('span', { class: 'lbl', text: t('layers.options.rename') }), name))
     wrap.append(opacityRow(l))
     wrap.append(blendRow(l))
-    const M = (label: string, fn: () => void, o: { on?: boolean; disabled?: boolean; danger?: boolean } = {}): void => {
+    const M = (label: string, fn: () => void, o: { on?: boolean; disabled?: boolean; danger?: boolean; title?: string } = {}): void => {
       wrap.append(
         menuItem(
           label,
@@ -528,7 +554,28 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
       )
     }
     const S = (label: string): void => void wrap.append(h('div', { class: 'sect', text: label }))
-    if (l.isGroup) {
+    if (l.langSet) {
+      S(t('langs.options.section'))
+      for (const lg of doc.langs) {
+        if (lg.code === doc.viewLang) continue
+        M(t('langs.options.copyTo', { name: lg.name }), () => {
+          const msg = copyCell(doc, l.id, doc.viewLang, lg.code)
+          if (msg) ctx.toast(msg)
+        }, { disabled: !doc.cellOf(l.id, doc.viewLang) })
+      }
+      for (const lg of doc.langs) if (lg.code !== doc.viewLang) M(t('langs.options.copyFrom', { name: lg.name }), () => {
+        const msg = copyCell(doc, l.id, lg.code, doc.viewLang)
+        if (msg) ctx.toast(msg)
+      }, { disabled: !doc.cellOf(l.id, lg.code) })
+      M(t('langs.options.clearCell', { name: doc.langs.find((x) => x.code === doc.viewLang)?.name ?? doc.viewLang }), () => act.clear(l.id), { disabled: !doc.cellOf(l.id, doc.viewLang) || l.locked })
+      S(t('layers.options.merge'))
+      M(t('layers.options.mergeDown'), () => (act.mergeSmart(), go({ kind: 'list' })))
+      M(t('langs.options.flattenCurrent'), () => (act.flattenLangRow(l.id), go({ kind: 'list' })))
+      M(t('core.common.duplicate'), () => (act.duplicate(l.id), go({ kind: 'list' })))
+      M(t('layers.panel.alphaLockTitle'), () => act.toggle('alphaLock', l.id), { on: l.alphaLock })
+      M(t('layers.options.locked'), () => act.toggle('locked', l.id), { on: l.locked })
+      M(t('core.common.delete'), () => (act.remove(l.id), go({ kind: 'list' })), { danger: true })
+    } else if (l.isGroup) {
       S(t('layers.options.group'))
       M(t('layers.options.ungroup'), () => (act.ungroup(l.id), go({ kind: 'list' })))
       M(t('layers.options.mergeGroup'), () => (act.mergeGroup(l.id), go({ kind: 'list' })))
@@ -544,7 +591,13 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
       M(t('layers.options.fillLayer'), () => act.fill(l.id), { disabled: l.locked })
       M(t('layers.options.clear'), () => act.clear(l.id), { disabled: l.locked })
       M(t('layers.panel.alphaLockTitle'), () => act.toggle('alphaLock', l.id), { on: l.alphaLock })
-      M(t('layers.options.clippingMask'), () => act.toggle('clipping', l.id), { on: l.clipping })
+      // a clipping mask clips to the nearest non-clipping layer below among its siblings; a group or language row cannot be that base (the renderer
+      // would draw the layer normally), so the item is off there instead of silently doing nothing
+      const sibs = doc.childrenOf(l.parentId)
+      let bi = sibs.findIndex((x) => x.id === l.id) - 1
+      while (bi >= 0 && sibs[bi].clipping && !sibs[bi].isGroup) bi--
+      const onGroup = bi >= 0 && sibs[bi].isGroup
+      M(t('layers.options.clippingMask'), () => act.toggle('clipping', l.id), { on: l.clipping, disabled: onGroup && !l.clipping, ...(onGroup && !l.clipping ? { title: t(sibs[bi].langSet ? 'layers.options.clippingOnLangRow' : 'layers.options.clippingOnGroup') } : {}) })
       M(t('layers.options.reference'), () => act.setReference(l.id), { on: l.reference })
       M(t('layers.options.invert'), () => act.invert(l.id), { disabled: l.locked })
       M(t('layers.options.drawingAssist'), () => act.toggle('drawingAssist', l.id), { on: l.drawingAssist })
@@ -572,6 +625,16 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
       M(t('layers.options.applyMask'), () => act.maskApply(l.id), { disabled: l.isGroup })
       M(t('layers.options.deleteMask'), () => act.maskDelete(l.id), { danger: true })
     }
+    root.append(wrap)
+  }
+
+  // ------------------------------------------------------------ LANGUAGES VIEW (switcher menu)
+  const buildLangs = (): void => {
+    const wrap = h('div', { class: 'lp-opt' })
+    wrap.append(h('div', { class: 'lp-opt-head' }, btn(t('layers.options.backToLayers'), t('core.common.back'), () => go({ kind: 'list' })), h('b', { text: t('langs.switcher.menuTitle') })))
+    wrap.append(menuItem(t('langs.menu.edit'), () => openLanguagesDialog(app, ctx.toast)))
+    wrap.append(menuItem(t('langs.menu.ghost'), () => doc.setLangGhost(!doc.langGhost), { on: doc.langGhost }))
+    wrap.append(h('p', { class: 'an-note', text: t('langs.menu.ghostNote'), style: 'padding:0 6px' }))
     root.append(wrap)
   }
 
@@ -621,6 +684,7 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
     root.replaceChildren()
     if (view.kind === 'options') buildOptions(view.id)
     else if (view.kind === 'blend') buildBlend(view.id)
+    else if (view.kind === 'langs') buildLangs()
     else {
       buildList()
       const l = root.querySelector('.layer-list')
@@ -634,13 +698,16 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
     schedule()
   }
   let offLayers = doc.events.on('layers', onLayers)
+  let offLang = doc.events.on('lang', onLayers)
   let offCommit = doc.events.on('commit', (e) => thumbs.markDirty(e.layerId))
   const offDoc = app.events.on('doc', (d) => {
     offLayers()
+    offLang()
     offCommit()
     doc = d
     thumbs.markDirty(null)
     offLayers = doc.events.on('layers', onLayers)
+    offLang = doc.events.on('lang', onLayers)
     offCommit = doc.events.on('commit', (e) => thumbs.markDirty(e.layerId))
     view = { kind: 'list' }
     schedule()
@@ -650,6 +717,7 @@ export function renderLayerPanel(body: HTMLElement, ctx: UIContext): () => void 
   return () => {
     blendCleanup?.()
     offLayers()
+    offLang()
     offCommit()
     offDoc()
     cancelAnimationFrame(raf)

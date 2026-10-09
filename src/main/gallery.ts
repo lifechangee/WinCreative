@@ -1,6 +1,7 @@
 import { app, ipcMain } from 'electron'
 import { join, resolve, sep } from 'path'
-import { appendFile, mkdir, open as fsOpen, readdir, readFile, rename, stat, unlink, writeFile } from 'fs/promises'
+import { appendFile, copyFile, link, mkdir, open as fsOpen, readdir, readFile, rename, stat, unlink, writeFile } from 'fs/promises'
+import { verifyZipFile } from './zipVerify'
 import type { FileHandle } from 'fs/promises'
 
 /**
@@ -15,6 +16,24 @@ export function registerGalleryIpc(): void {
     const p = resolve(root(), name)
     if (!p.startsWith(resolve(root()) + sep)) throw new Error('Bad gallery path')
     return p
+  }
+  /**
+   * Replace `dest` by the finished temp file: a .bwk is verified first (central directory + every entry inflated, CRC-32 compared) so a corrupt
+   * write can never replace a good file; the previous version is kept as <name>.bwk~ (hard link, copy as fallback) until the next good save.
+   */
+  const commit = async (tmp: string, dest: string): Promise<void> => {
+    if (dest.endsWith('.bwk')) {
+      try {
+        await verifyZipFile(tmp)
+      } catch (e) {
+        await unlink(tmp).catch(() => undefined)
+        throw new Error('save verification failed: ' + (e as Error).message)
+      }
+      const bak = dest + '~'
+      await unlink(bak).catch(() => undefined)
+      await link(dest, bak).catch(() => copyFile(dest, bak).catch(() => undefined)) // no previous version yet -> nothing to keep
+    }
+    await rename(tmp, dest)
   }
   ipcMain.handle('gallery:dir', async () => {
     await mkdir(root(), { recursive: true })
@@ -41,7 +60,7 @@ export function registerGalleryIpc(): void {
     const p = await safe(name)
     const tmp = p + '.' + ++tmpSeq + '.tmp' // unique: two writes of the same file must not fight over one temp name
     await writeFile(tmp, data)
-    await rename(tmp, p)
+    await commit(tmp, p)
     return true
   })
   // chunked write (renderer sends ~1 MB pieces so a 40 MB artwork never blocks the UI in one huge IPC message)
@@ -67,7 +86,7 @@ export function registerGalleryIpc(): void {
     if (!w) throw new Error('no such writer')
     writers.delete(id)
     await w.fh.close()
-    await rename(w.tmp, w.dest)
+    await commit(w.tmp, w.dest)
     return true
   })
   ipcMain.handle('gallery:wabort', async (_e, id: number) => {

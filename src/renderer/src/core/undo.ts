@@ -3,6 +3,8 @@ export interface Command {
   label: string
   /** Optional metadata forwarded to the commit event bus on undo/redo. */
   layerId?: string | null
+  /** every layer a multi-layer step touched (the time-lapse recorder tells language cells from common layers with it) */
+  layerIds?: string[]
   dirtyRect?: { x: number; y: number; w: number; h: number } | null
   /** Approximate memory held by this command (bytes), for budgeting. */
   bytes: number
@@ -50,6 +52,10 @@ export class UndoStack {
   }
   get totalBytes(): number {
     return this.bytes
+  }
+  /** the command the next undo reverts (not removed) */
+  get top(): Command | null {
+    return this.done.length ? this.done[this.done.length - 1] : null
   }
   get nextUndoLabel(): string | null {
     return this.done.length ? this.done[this.done.length - 1].label : null

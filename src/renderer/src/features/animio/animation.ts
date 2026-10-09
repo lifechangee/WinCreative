@@ -7,6 +7,8 @@ import type { Surface } from '../../gl/gpu'
 import { FrameRenderer } from '../../io/frameRender'
 import { registerBwkExtension } from '../../io/bwk'
 import { resample } from '../../io/gpuUtil'
+import { regionPieces } from '../../core/tiles'
+import { TileStore } from '../../doc/tileStore'
 import { PlayMode, onionFrames, playbackSequence, stepAtTick } from './schedule'
 
 export interface OnionSettings {
@@ -190,14 +192,30 @@ export class AnimAssist {
     if (!fr.length) return roots
     const cur = fr[this.current]
     const s = this.state
-    if (this.ghostDirty && !this.busyGhost && !this.playing) this.rebuildGhosts()
+    if (this.ghostDirty && !this.busyGhost && !this.playing) {
+      // infinite: the frame copy needs GPU work that must not run inside a compose pass: rebuild on the next frame
+      if (!this.doc.isInfinite) this.rebuildGhosts()
+      else if (!this.ghostTimer) {
+        this.ghostTimer = requestAnimationFrame(() => {
+          this.ghostTimer = 0
+          if (!this.ghostDirty || this.playing) return
+          this.rebuildGhosts()
+          this.doc.events.emit('change', { rect: null })
+        })
+      }
+    }
     const ghostLayers = !this.playing && s.onion.on ? this.ghosts.map((g) => g.layer) : []
     const primary = s.blendPrimary ? [...ghostLayers, cur] : [cur, ...ghostLayers]
     return [...this.backgrounds(), ...primary, ...this.foregrounds()]
   }
 
+  private ghostTimer = 0
+
   private freeGhosts(): void {
-    for (const g of this.ghosts) g.surf.dispose()
+    for (const g of this.ghosts) {
+      if (g.layer.tiles) g.layer.dispose()
+      else g.surf.dispose()
+    }
     this.ghosts = []
   }
 
@@ -213,10 +231,21 @@ export class AnimAssist {
       const doc = this.doc
       const r = this.renderer()
       for (const sp of specs) {
-        const surf = this.app.gpu.surface(doc.width, doc.height, doc.format)
+        const gpu = this.app.gpu
         const src = r.renderFull([fr[sp.frame]])
+        const surf = gpu.surface(src.w, src.h, doc.format)
         const c = hexRgb(sp.offset < 0 ? s.onion.colorBefore : s.onion.colorAfter)
-        resample(this.app.gpu, src, surf, { origin: [0, 0], step: [1, 1], tint: [c[0], c[1], c[2], 0.85], alpha: sp.opacity })
+        resample(gpu, src, surf, { origin: [0, 0], step: [1, 1], tint: [c[0], c[1], c[2], 0.85], alpha: sp.opacity })
+        if (doc.isInfinite) {
+          // infinite canvas: the ghost lives in tiles at the frame rectangle (Animation Assist works inside the frame)
+          const area = r.areaRect()
+          const layer = new Layer('ghost:' + fr[sp.frame].id, gpu.surface(1, 1, 'rgba8'), { name: 'onion', opacity: 1 })
+          layer.tiles = new TileStore(gpu, doc.format)
+          for (const p of regionPieces(area)) gpu.blit(surf, { x: p.dx, y: p.dy, w: p.w, h: p.h }, layer.tiles.ensure(p.tx, p.ty), p.sx, p.sy)
+          surf.dispose()
+          this.ghosts.push({ surf: layer.pixels, layer })
+          continue
+        }
         const layer = new Layer('ghost:' + fr[sp.frame].id, surf, { name: 'onion', opacity: 1 })
         this.ghosts.push({ surf, layer })
       }

@@ -29,6 +29,8 @@ import {
   updatePause
 } from './tlModel'
 import { openExportDialog } from './tlExportUi'
+import { CompareView } from './tlCompare'
+import { copyEditBetweenVariants } from './tlVariants'
 import './tlEditor.css'
 
 /** Time-lapse editor: a full-window mode (top-bar tab) with preview, inspector and a zoomable timeline. */
@@ -228,6 +230,7 @@ class Editor {
       h('button', { class: 'tle-btn tle-back', onclick: () => this.onClose() }, svg(ICON.back, 18), h('span', { text: tk('animio.tle.back') })),
       h('div', { class: 'tle-title' }, svg(ICON.film, 18), h('span', { text: tk('animio.tle.title') })),
       h('div', { class: 'tle-spacer' }),
+      ...(this.core.rec.variants.length > 1 ? [wbtn(tk('langs.cmp.open'), () => void this.openCompare())] : []),
       this.undoBtn,
       this.redoBtn,
       wbtn(tk('animio.tle.reset'), () => core.reset()),
@@ -377,7 +380,78 @@ class Editor {
     }
     const finale = card(tk('animio.tle.finale.title'), row(tk('animio.tle.finale.hold'), fin('holdSeconds', 600).el), row(tk('animio.tle.finale.fadeIn'), fin('fadeIn', 60).el), row(tk('animio.tle.finale.fadeOut'), fin('fadeOut', 60).el))
 
-    return [selCard, hideCard, speedCard, pauseCard, finale]
+    const out = [selCard, hideCard, speedCard, pauseCard, finale]
+    const rec = core.rec
+    if (rec.variants.length) out.unshift(this.variantCard())
+    return out
+  }
+
+  // ---------------------------------------------------------------- language variants
+  private variantBtns = new Map<string, HTMLButtonElement>()
+  private cmp: CompareView | null = null
+
+  private variantCard(): HTMLElement {
+    const core = this.core
+    const rec = core.rec
+    const langs = this.app.doc.langs.filter((l) => rec.variants.includes(l.code))
+    const seg = h('div', { class: 'tle-seg', role: 'group' })
+    for (const l of langs) {
+      const b = h('button', { class: 'tle-seg-btn', text: l.code.toUpperCase(), title: l.name, 'data-lang': l.code, onclick: () => core.setVariant(l.code) })
+      this.variantBtns.set(l.code, b)
+      seg.append(b)
+    }
+    const copies = h('div', { class: 'tle-btns' })
+    for (const l of langs) {
+      const b = h('button', { class: 'tle-btn', text: t('langs.tl.copyFrom', { name: l.name }), 'data-from': l.code })
+      b.addEventListener('click', () => {
+        const cur = rec.variantKey
+        if (!cur || cur === l.code) return
+        core.commit(copyEditBetweenVariants(rec.editFor(l.code), core.edit, core.tags, l.code, cur))
+      })
+      this.syncers.push(() => {
+        b.textContent = t('langs.tl.copyFrom', { name: l.name })
+        b.style.display = rec.variantKey === l.code ? 'none' : ''
+      })
+      copies.append(b)
+    }
+    this.syncers.push(() => {
+      for (const [c, b] of this.variantBtns) b.classList.toggle('on', c === rec.variantKey)
+    })
+    const late = h('p', { class: 'tle-warn' })
+    this.syncers.push(() => {
+      const v = rec.variantKey
+      const lg = v ? this.app.doc.langs.find((x) => x.code === v) : undefined
+      late.style.display = v && lg && rec.lateLangs[v] !== undefined ? '' : 'none'
+      if (lg) late.textContent = t('langs.tl.late', { name: lg.name })
+    })
+    return card(tk('langs.tl.title'), seg, h('p', { class: 'tle-note', text: tk('langs.tl.note') }), late, copies)
+  }
+
+  private async openCompare(): Promise<void> {
+    if (this.cmp) return
+    this.pause()
+    const cv = new CompareView(this.app, this.core.rec, () => this.closeCompare())
+    await cv.load()
+    this.cmp = cv
+    this.root.classList.add('cmp')
+    this.root.insertBefore(cv.el, this.root.querySelector('.tle-main'))
+  }
+  private closeCompare(): void {
+    this.cmp?.dispose()
+    this.cmp = null
+    this.root.classList.remove('cmp')
+    this.queueDraw()
+  }
+  /** QA / selftest handle */
+  compare(): CompareView | null {
+    return this.cmp
+  }
+  async openCompareForTest(): Promise<CompareView | null> {
+    await this.openCompare()
+    return this.cmp
+  }
+  closeCompareForTest(): void {
+    this.closeCompare()
   }
 
   private breakdown(): HTMLElement {
@@ -471,6 +545,8 @@ class Editor {
   dispose(): void {
     this.closed = true
     this.playing = false
+    this.cmp?.dispose()
+    this.cmp = null
     for (const o of this.offs) o()
     this.core.dispose()
     this.root.remove()
@@ -708,6 +784,7 @@ class Editor {
   // ---------------------------------------------------------------- keyboard
   /** Returns true when the key was consumed. */
   handleKey(e: KeyboardEvent): boolean {
+    if (this.cmp) return this.cmp.handleKey(e)
     if (document.querySelector('.an-modal-bg')) return false // a dialog (export) owns the keyboard
     const typing = (e.target as HTMLElement | null)?.matches?.('input, textarea, select')
     const ctrl = e.ctrlKey || e.metaKey
@@ -1161,6 +1238,8 @@ let session: { ed: Editor; offKey: () => void } | null = null
 const TAB_ID = 'timelapse'
 
 export const isTimelapseEditorOpen = (): boolean => !!session
+/** QA / selftest handle of the open editor */
+export const timelapseEditor = (): Editor | null => session?.ed ?? null
 export function closeTimelapseEditor(): void {
   if (!session) return
   const s = session
@@ -1186,6 +1265,8 @@ export async function openTimelapseEditor(app: App, ui: UIContext, opts: { expor
   }
   ensureStyles()
   if (app.engine.active) return
+  // the editor opens on the language the canvas shows right now
+  if (app.doc.hasLangLayers && app.doc.langs.some((l) => l.code === app.doc.viewLang)) rec.setEditVariant(app.doc.viewLang)
   const core = new TlEditorCore(rec)
   await core.load()
   const ed = new Editor(app, ui, core, () => closeTimelapseEditor())

@@ -5,6 +5,8 @@ import { askText } from '../features/color/dialogs'
 import { PROFILE_LABELS } from '../io/colorProfile'
 import { getLang, I18nText, resolveText, t, tk } from '../i18n'
 import { h } from './dom'
+import { createFrame } from '../features/frame'
+import { FRAME_PRESETS, presetById } from '../features/frame/model'
 
 export type Unit = 'px' | 'in' | 'cm' | 'mm'
 export interface CanvasPreset {
@@ -66,14 +68,20 @@ export interface NewCanvasOptions {
   background: [number, number, number]
   transparent: boolean
   timelapse: string
+  /** unbounded canvas (docs/INFINITE_CANVAS.md); w / h are then ignored */
+  infinite?: boolean
+  /** frame preset id (features/frame); omitted = no frame */
+  frame?: string
 }
 
 /** Create the document, register it as a gallery artwork and make it current. */
 export async function createCanvas(app: App, o: NewCanvasOptions): Promise<void> {
   const store = galleryRef.store
   await store?.flush()
-  const doc = app.newDocument(o.w, o.h, { background: { color: o.background, visible: !o.transparent } })
+  const doc = app.newDocument(o.w, o.h, { background: { color: o.background, visible: !o.transparent }, ...(o.infinite ? { kind: 'infinite' as const } : {}) })
   doc.name = o.name
+  const fp = o.frame ? presetById(o.frame) : undefined
+  if (fp) createFrame(app, fp.w, fp.h, fp.id)
   ;(window as any).brushwork_animio?.applyCanvasOptions?.(doc, o) // time-lapse quality, DPI, colour profile (features/animio)
   if (store) await store.addDocument(doc, { name: o.name, profile: o.profile, dpi: o.dpi })
   galleryRef.hide?.()
@@ -93,6 +101,9 @@ export function showNewDocumentDialog(app: App, root: HTMLElement): void {
   const tlSel = h('select', {}, ...TL_QUALITY.map((p) => h('option', { value: p, text: tk('ui.newdoc.tl.' + p) })))
   const bg = h('input', { type: 'color', value: '#ffffff' })
   const transparent = h('input', { type: 'checkbox' })
+  const infiniteChk = h('input', { type: 'checkbox' })
+  const frameSel = h('select', {}, h('option', { value: '', text: tk('frame.preset.none') }), ...FRAME_PRESETS.map((p) => h('option', { value: p.id, text: tk('frame.preset.' + p.id) })))
+  const infiniteHint = h('div', { class: 'bw-hint', text: tk('ui.newdoc.infiniteHint') })
   const info = h('div', { class: 'bw-hint' })
   const presetBox = h('div', { class: 'presets' })
   const close = (): void => back.remove()
@@ -102,6 +113,14 @@ export function showNewDocumentDialog(app: App, root: HTMLElement): void {
     return { w: Math.round(toPx(Number(wIn.value), unit, dpi)), h: Math.round(toPx(Number(hIn.value), unit, dpi)) }
   }
   const refreshInfo = (): void => {
+    for (const el of [wIn, hIn, unitSel, dpiIn]) (el as HTMLInputElement).disabled = infiniteChk.checked
+    presetBox.style.opacity = infiniteChk.checked ? '0.4' : ''
+    infiniteHint.style.display = infiniteChk.checked ? '' : 'none'
+    if (infiniteChk.checked) {
+      info.textContent = t('ui.newdoc.infiniteInfo', { layers: maxLayers(4096, 4096) })
+      info.style.color = ''
+      return
+    }
     const s = pxSize()
     const ok = s.w >= 16 && s.h >= 16 && s.w <= app.gpu.maxTexture && s.h <= app.gpu.maxTexture
     info.textContent = ok ? t('ui.newdoc.info', { w: s.w, h: s.h, layers: maxLayers(s.w, s.h), mp: ((s.w * s.h) / 1e6).toFixed(1) }) : t('ui.newdoc.sizeRange', { max: app.gpu.maxTexture })
@@ -120,6 +139,7 @@ export function showNewDocumentDialog(app: App, root: HTMLElement): void {
     setPx(s.w, s.h, Number(dpiIn.value) || 132)
   })
   for (const el of [wIn, hIn, dpiIn]) el.addEventListener('input', refreshInfo)
+  infiniteChk.addEventListener('change', refreshInfo)
 
   const drawPresets = (): void => {
     presetBox.replaceChildren(
@@ -154,8 +174,8 @@ export function showNewDocumentDialog(app: App, root: HTMLElement): void {
     class: 'primary',
     text: tk('core.common.create'),
     onclick: () => {
-      const s = pxSize()
-      if (!(s.w >= 16 && s.h >= 16 && s.w <= app.gpu.maxTexture && s.h <= app.gpu.maxTexture)) {
+      const s = infiniteChk.checked ? { w: 4096, h: 4096 } : pxSize()
+      if (!infiniteChk.checked && !(s.w >= 16 && s.h >= 16 && s.w <= app.gpu.maxTexture && s.h <= app.gpu.maxTexture)) {
         app.notify(t('ui.newdoc.sizeRange', { max: app.gpu.maxTexture }))
         return
       }
@@ -169,7 +189,9 @@ export function showNewDocumentDialog(app: App, root: HTMLElement): void {
         profile: profSel.value,
         background: c,
         transparent: transparent.checked,
-        timelapse: tlSel.value
+        timelapse: tlSel.value,
+        infinite: infiniteChk.checked,
+        frame: frameSel.value || undefined
       }).catch((e) => app.notify(t('ui.newdoc.createFailed', { error: (e as Error).message })))
     }
   })
@@ -181,10 +203,13 @@ export function showNewDocumentDialog(app: App, root: HTMLElement): void {
       { class: 'modal bw-newdoc' },
       h('h3', { text: tk('ui.newdoc.title') }),
       nameIn,
+      h('label', { class: 'chk' }, infiniteChk, tk('ui.newdoc.infinite')),
+      infiniteHint,
       presetBox,
       h('div', { class: 'row' }, h('span', { class: 'lbl', text: tk('ui.newdoc.width') }), wIn, h('span', { class: 'lbl', text: tk('ui.newdoc.height') }), hIn),
       h('div', { class: 'row' }, h('span', { class: 'lbl', text: tk('ui.newdoc.units') }), unitSel, h('span', { class: 'lbl', text: tk('ui.newdoc.dpi') }), dpiIn),
       info,
+      h('div', { class: 'row' }, h('span', { class: 'lbl', text: tk('frame.newdoc.label') }), frameSel),
       h('div', { class: 'row' }, h('span', { class: 'lbl', text: tk('ui.newdoc.colour') }), profSel, tlSel),
       h('div', { class: 'row' }, h('span', { class: 'lbl', text: tk('ui.newdoc.background') }), bg, h('label', { class: 'chk' }, transparent, tk('ui.newdoc.transparent'))),
       h('div', { class: 'row end' }, h('button', { text: tk('ui.newdoc.saveAsPreset'), onclick: () => void savePreset() }), h('button', { text: tk('core.common.cancel'), onclick: close }), create)
@@ -194,6 +219,7 @@ export function showNewDocumentDialog(app: App, root: HTMLElement): void {
   nameIn.addEventListener('keydown', (e) => e.stopPropagation())
   drawPresets()
   setPx(2048, 2048, 132)
+  refreshInfo()
   root.append(back)
   nameIn.focus()
   nameIn.select()

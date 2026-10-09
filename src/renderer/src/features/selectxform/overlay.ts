@@ -77,12 +77,14 @@ uniform float uMirror;
 uniform float uH;
 uniform float uTime;
 uniform float uTint;
+uniform float uInf;   // 1: infinite canvas, the tint continues outside the mask window
 out vec4 o;
 void main(){
   vec2 d = vec2((gl_FragCoord.x - uHalf.x) * uMirror, (uH - gl_FragCoord.y) - uHalf.y);
   vec2 p = uCenter + vec2(uRot.x * d.x + uRot.y * d.y, -uRot.y * d.x + uRot.x * d.y) / uZoom;
-  if (p.x < 0.0 || p.y < 0.0 || p.x >= uDoc.x || p.y >= uDoc.y) { o = vec4(0.0); return; }
-  float m = texture(uMask, p / uDoc).r;
+  bool inside = !(p.x < 0.0 || p.y < 0.0 || p.x >= uDoc.x || p.y >= uDoc.y);
+  if (!inside && uInf < 0.5) { o = vec4(0.0); return; }
+  float m = inside ? texture(uMask, p / uDoc).r : 0.0;
   float g = length(vec2(dFdx(m), dFdy(m)));
   float dist = abs(m - 0.5) / max(g, 1e-5);
   float edge = 1.0 - smoothstep(0.5, 1.5, dist);
@@ -112,9 +114,12 @@ export function installAnts(app: App, hidden: () => boolean): void {
     gpu.bindTarget(null, null)
     gl.viewport(0, 0, W, H)
     gpu.bindTex(0, tex)
+    const inf = app.doc.isInfinite
+    const wn = inf ? svc.window : null
     p.i('uMask', 0)
-      .v2('uDoc', app.doc.width, app.doc.height)
-      .v2('uCenter', view.cx, view.cy)
+      .f('uInf', inf ? 1 : 0)
+      .v2('uDoc', wn ? wn.w : app.doc.width, wn ? wn.h : app.doc.height)
+      .v2('uCenter', view.cx - (wn ? wn.x : 0), view.cy - (wn ? wn.y : 0))
       .v2('uHalf', W / 2, H / 2)
       .f('uZoom', view.zoom * (W / cssW))
       .v2('uRot', Math.cos(view.rot), Math.sin(view.rot))

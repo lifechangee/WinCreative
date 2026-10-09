@@ -13,7 +13,8 @@ import type { ImportedText, MappedAdjustment } from './psdMap'
 export function docToExLayers(gpu: GPU, doc: Document, parentId: string | null = null): ExLayer[] {
   const out: ExLayer[] = []
   for (const l of doc.childrenOf(parentId)) {
-    const base = { name: l.name, visible: l.visible, opacity: l.opacity, blendMode: l.blendMode, clipping: l.clipping, alphaLock: l.alphaLock }
+    // language layers: a group per language layer holding a layer per language cell (named "Row [EN]"); only the view language's cell is visible
+    const base = { name: l.name, visible: l.visible && (!l.lang || l.lang === doc.viewLang), opacity: l.opacity, blendMode: l.blendMode, clipping: l.clipping, alphaLock: l.alphaLock }
     if (l.isGroup) out.push({ ...base, children: docToExLayers(gpu, doc, l.id), open: !l.collapsed, passThrough: l.passThrough })
     else {
       const b = layerBitmap(gpu, doc, l)

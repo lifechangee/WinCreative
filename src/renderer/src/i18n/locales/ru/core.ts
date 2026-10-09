@@ -279,6 +279,7 @@ const dict: Record<string, string> = {
   'core.blend.subtract': 'Вычитание',
   'core.blend.divide': 'Разделить',
   'core.history.feather_selection': 'Растушёвка выделения',
+  'core.toast.tileCorrupt': 'Часть холста не удалось восстановить из памяти, она оставлена пустой. Если что-то пропало, используйте отмену или откройте последнюю сохранённую версию рисунка.',
   'core.toast.viewFlipped': 'Вид холста отражён',
   'core.toast.viewRestored': 'Вид холста восстановлен',
   'core.hover.opacity': 'Непрозрачность {n}%',
@@ -293,5 +294,9 @@ const dict: Record<string, string> = {
   'core.history.select_rectangle': 'Прямоугольное выделение',
   'core.history.select_ellipse': 'Эллиптическое выделение',
   'core.history.select_freehand': 'Произвольное выделение',
+  'core.history.smart_selection': 'Умное выделение',
+  'core.history.cut_object_to_new_layer': 'Вырезание объекта на новый слой',
+  'core.history.copy_object_to_new_layer': 'Копирование объекта на новый слой',
+  'core.history.remove_background': 'Удаление фона',
 }
 export default dict

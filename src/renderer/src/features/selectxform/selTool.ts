@@ -2,8 +2,13 @@ import type { App } from '../../app/app'
 import type { Sample } from '../../core/types'
 import { t } from '../../i18n'
 import type { Tool, ToolHost } from '../../tools/tool'
-import { ellipsePolygon, floodFill, MaskPatch, Pt, rasterizePolygon, rectPolygon, SelMode, softenPatch, uniformBox } from './geom'
-import type { LiveEdit } from './selection'
+import type { Rect } from '../../core/types'
+import { workRect } from '../frame/workRect'
+import { ellipsePolygon, floodFill, floodFillIn, MaskPatch, Pt, polygonClip, rasterizePolygon, rasterizePolygonIn, rectPolygon, SelMode, softenPatch, softenPatchIn, uniformBox } from './geom'
+import { LiveEdit, MAX_SEL_WINDOW } from './selection'
+
+/** Largest area (px per side) the magic wand reads on an infinite canvas. */
+const WAND_CAP = 6144
 
 export type SelShape = 'auto' | 'free' | 'rect' | 'ellipse'
 
@@ -28,6 +33,9 @@ export class SelectionTool implements Tool {
   private freeMoved = false
   // automatic
   private pixels: Uint8ClampedArray | null = null
+  /** infinite canvas: the document rect `pixels` covers (the work rect around the seed) */
+  private wandArea: Rect | null = null
+  private wandWarned = false
   private thrNow = 0.2
   private wandRaf = 0
   onChange: (() => void) | null = null
@@ -54,7 +62,13 @@ export class SelectionTool implements Tool {
     this.live = this.app.selection.begin()
     if (shape === 'auto') {
       const { doc, compositor } = this.app
-      this.pixels = selSettings.source === 'reference' ? compositor.readFlattened(true) : this.app.gpu.readRGBA8(doc.activeLayer.surface, { x: 0, y: 0, w: doc.width, h: doc.height })
+      if (doc.isInfinite) {
+        const area = this.wandAreaAround(s.x, s.y)
+        const l = doc.activeLayer
+        this.wandArea = area
+        this.wandWarned = false
+        this.pixels = selSettings.source === 'reference' || !l || l.isGroup ? compositor.readFlattened(area, 1, true).px : doc.readRegionPixels(l, area)
+      } else this.pixels = selSettings.source === 'reference' ? compositor.readFlattened(true) : this.app.gpu.readRGBA8(doc.activeLayer.surface, { x: 0, y: 0, w: doc.width, h: doc.height })
       this.thrNow = selSettings.threshold
       this.runWand()
     }
@@ -109,6 +123,7 @@ export class SelectionTool implements Tool {
       this.runWand(live, s0)
       selSettings.threshold = this.thrNow
       this.pixels = null
+      this.wandArea = null
       if (!live.commit('Select color area')) this.app.notify(t('selectxform.bar.nothing'))
     } else if (!this.moved) {
       // tap without drag: deselect (replace mode) like Procreate
@@ -134,7 +149,16 @@ export class SelectionTool implements Tool {
     let y1 = b.y
     if (selSettings.uniform || this.shiftDown) [x1, y1] = uniformBox(a.x, a.y, b.x, b.y)
     const poly = selSettings.shape === 'rect' ? rectPolygon(a.x, a.y, x1, y1) : ellipsePolygon(a.x, a.y, x1, y1)
-    this.live?.preview(rasterizePolygon(poly, this.app.doc.width, this.app.doc.height), selSettings.mode)
+    this.live?.preview(this.raster(poly), selSettings.mode)
+  }
+
+  /** Rasterise a polygon: canvas-clipped on fixed documents, unbounded (window-limited) on infinite ones. */
+  private raster(poly: Pt[]): MaskPatch | null {
+    const doc = this.app.doc
+    if (!doc.isInfinite) return rasterizePolygon(poly, doc.width, doc.height)
+    const { rect, clipped } = polygonClip(poly, MAX_SEL_WINDOW)
+    if (clipped) this.app.notify(t('selectxform.limitedWindow', { n: MAX_SEL_WINDOW }))
+    return rasterizePolygonIn(poly, rect)
   }
 
   // ---------------------------------------------------------------- freehand
@@ -153,7 +177,7 @@ export class SelectionTool implements Tool {
   private previewPolygon(): void {
     if (!this.live) this.live = this.app.selection.begin()
     if (this.pts.length < 3) return
-    this.live.preview(rasterizePolygon(this.pts, this.app.doc.width, this.app.doc.height), selSettings.mode)
+    this.live.preview(this.raster(this.pts), selSettings.mode)
   }
 
   get polygonOpen(): boolean {
@@ -175,7 +199,7 @@ export class SelectionTool implements Tool {
       live.cancel()
       return
     }
-    live.preview(rasterizePolygon(pts, this.app.doc.width, this.app.doc.height), selSettings.mode)
+    live.preview(this.raster(pts), selSettings.mode)
     live.commit('Select freehand')
     this.onChange?.()
   }
@@ -202,9 +226,35 @@ export class SelectionTool implements Tool {
   private runWand(live: LiveEdit | null = this.live, seed: Sample | null = this.start): void {
     const s = seed
     if (!live || !this.pixels || !s) return
+    if (this.app.doc.isInfinite && this.wandArea) {
+      const a = this.wandArea
+      const fill = floodFillIn(this.pixels, a, s.x, s.y, this.thrNow)
+      if (fill && !this.wandWarned) {
+        const r = fill.rect
+        if (r.x <= a.x || r.y <= a.y || r.x + r.w >= a.x + a.w || r.y + r.h >= a.y + a.h) {
+          this.wandWarned = true
+          this.app.notify(t('selectxform.limitedWork'))
+        }
+      }
+      live.preview(fill ? softenPatchIn(fill, a) : null, selSettings.mode)
+      return
+    }
     const { width: w, height: h } = this.app.doc
     const fill = floodFill(this.pixels, w, h, s.x, s.y, this.thrNow)
     const patch: MaskPatch | null = fill ? softenPatch(fill, w, h) : null
     live.preview(patch, selSettings.mode)
+  }
+
+  /** Infinite canvas: the work rect (frame, else visible area) around the seed, at most WAND_CAP px per side. */
+  private wandAreaAround(x: number, y: number): Rect {
+    const wr = workRect(this.app)
+    const inside = x >= wr.x && y >= wr.y && x < wr.x + wr.w && y < wr.y + wr.h
+    const base: Rect = inside ? wr : { x: Math.floor(x) - 512, y: Math.floor(y) - 512, w: 1024, h: 1024 }
+    const half = WAND_CAP / 2
+    const x0 = Math.max(base.x, Math.floor(x) - half)
+    const y0 = Math.max(base.y, Math.floor(y) - half)
+    const x1 = Math.min(base.x + base.w, Math.floor(x) + half)
+    const y1 = Math.min(base.y + base.h, Math.floor(y) + half)
+    return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) }
   }
 }

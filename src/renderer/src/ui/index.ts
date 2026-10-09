@@ -12,7 +12,7 @@ import { renderLayerPanel } from './layerPanel'
 import { PopoverHost } from './popover'
 import { MenuId, MenuItem, UIContext, isTopTabActive, menuEvents, menuItemParts, menus, panels, registerMenuItem, registerPanel, topTabEvents, topTabs } from './registry'
 import { buildSidebar } from './sidebar'
-import { t, tk } from '../i18n'
+import { onLangChange, t, tk } from '../i18n'
 
 const MENU_IDS: MenuId[] = ['gallery', 'actions', 'adjustments', 'selection', 'transform']
 
@@ -204,8 +204,17 @@ export function buildUI(app: App, root: HTMLElement): UIContext {
   syncColor()
 
   const title = topbar.querySelector('.tb-title')!
-  const syncTitle = (): void => void (title.textContent = `${app.doc.name} - ${app.doc.width} x ${app.doc.height}`)
-  app.events.on('doc', syncTitle)
+  // infinite canvases have no size (their 4096 x 4096 is only a nominal frame for legacy readers)
+  // language variants: the shown language stays visible while the layers panel is closed
+  const syncTitle = (): void => void (title.textContent = `${app.doc.name} - ${app.doc.isInfinite ? t('ui.newdoc.infinite') : app.doc.width + ' x ' + app.doc.height}${app.doc.hasLangLayers ? ' · ' + app.doc.viewLang.toUpperCase() : ''}`)
+  let offTitle: (() => void)[] = []
+  const bindTitle = (): void => {
+    offTitle.forEach((f) => f())
+    offTitle = [app.doc.events.on('lang', syncTitle), app.doc.events.on('layers', syncTitle)]
+  }
+  app.events.on('doc', () => (bindTitle(), syncTitle()))
+  bindTitle()
+  onLangChange(syncTitle)
   syncTitle()
 
   installShortcuts(app, {

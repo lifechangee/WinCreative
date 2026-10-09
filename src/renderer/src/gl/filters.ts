@@ -29,6 +29,34 @@ export function applyFilter(doc: Document, filterId: string, params: Record<stri
   const layer = doc.activeLayer
   if (!f || !layer || layer.locked) return false
   const gpu = doc.gpu
+  if (layer.tiles) {
+    // infinite canvas: filters are pixel-local, so they run on EVERY tile of the layer (no region limit), one undo step
+    const store = layer.tiles
+    const keys = [...store.keys()]
+    if (!keys.length) return false
+    const S = store.size
+    const full = { x: 0, y: 0, w: S, h: S }
+    const src = gpu.surface(S, S, store.fmt, 0)
+    const edit = doc.beginPixelEdit(layer, f.name)
+    for (const key of keys) {
+      const tile = store.getKey(key)
+      if (!tile) continue
+      edit.saveKey(key)
+      gpu.blit(tile, full, src, 0, 0)
+      const p = gpu.program('filter:' + f.id, FS_VERT, filterFragment(f.glsl)).use()
+      gpu.bindTex(0, src.tex)
+      p.i('uSrc', 0).v2('uCanvas', S, S)
+      bindClipMask(gpu, p, store.tileRectOf(key))
+      for (const [k, v] of Object.entries({ ...f.params, ...params })) p.f(k, v)
+      gpu.gl.disable(gpu.gl.BLEND)
+      gpu.bindTarget(tile, null)
+      gpu.fullscreen()
+    }
+    src.dispose()
+    const dirty = edit.finish()
+    doc.emitCommit('filter', layer.id, dirty, f.name)
+    return true
+  }
   const full = { x: 0, y: 0, w: doc.width, h: doc.height }
   const edit = doc.beginPixelEdit(layer, f.name)
   edit.save(full)
@@ -134,13 +162,15 @@ export class FX {
   private all = new Set<Surface>()
   readonly maxDim: number
 
+  /** `refDim`: size scale for relative parameters (blur radius ...) when the surface is padded beyond the area the user sees. */
   constructor(
     readonly gpu: GPU,
     readonly w: number,
     readonly h: number,
-    readonly fmt: PixFormat
+    readonly fmt: PixFormat,
+    refDim?: number
   ) {
-    this.maxDim = Math.max(w, h)
+    this.maxDim = refDim ?? Math.max(w, h)
   }
 
   /** Borrow a temporary surface (default: canvas size). Return it with free(). */

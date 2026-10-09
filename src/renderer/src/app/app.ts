@@ -1,9 +1,13 @@
 import { t } from '../i18n'
+import { blobHooks } from '../doc/tileStore'
+import { tileMemory } from '../doc/tileMemory'
 import { Emitter } from '../core/events'
 import { unionRect } from '../core/geometry'
 import type { Rect, Sample } from '../core/types'
 import { View, fitView, toggleMirrorView } from '../core/viewTransform'
 import { Document, DocOptions } from '../doc/document'
+import { guardHooks } from '../doc/infiniteGuard'
+import { clipMask } from '../gl/clipMask'
 import { BrushEngine } from '../gl/brushEngine'
 import { Compositor } from '../gl/compositor'
 import { GPU } from '../gl/gpu'
@@ -80,6 +84,14 @@ export class App implements ToolHost {
   constructor(readonly canvas: HTMLCanvasElement, cursorEl: HTMLElement) {
     this.cursorEl = cursorEl
     this.gpu = new GPU(canvas)
+    // WebGL context lost (driver reset / GPU process crash): every texture is gone. Pixels are not recoverable from here, so reload the window:
+    // the last artwork reopens from the gallery autosave + stroke journal (main shows the translated notice).
+    let lostTimer = 0
+    this.gpu.contextListeners.push((st) => {
+      window.clearTimeout(lostTimer)
+      if (st === 'lost') lostTimer = window.setTimeout(() => window.brushwork?.gpuLost(), 4000) // never restored: reload anyway
+      else window.brushwork?.gpuLost()
+    })
     generateDefaultTextures()
     registerDefaultPresets()
     registerBuiltinFilters()
@@ -87,6 +99,12 @@ export class App implements ToolHost {
     this.registerTool('smudge', new PaintTool('smudge', 'smudge'))
     this.registerTool('eraser', new PaintTool('eraser', 'erase'))
 
+    guardHooks.notify = (m) => this.notify(m)
+    let corruptShown = 0
+    blobHooks.onCorrupt = () => {
+      if (Date.now() - corruptShown > 30000) this.notify(t('core.toast.tileCorrupt'))
+      corruptShown = Date.now()
+    }
     // autosave yields whenever a stroke is in progress
     saveHooks.busy = () => this.engine.active || this.input.drawing
     this.newDocument(2048, 2048)
@@ -173,6 +191,10 @@ export class App implements ToolHost {
     this.doc = doc
     if (this.compositor) this.compositor.setDocument(doc)
     else this.compositor = new Compositor(this.gpu, doc)
+    this.compositor.inf.onPending = () => this.requestRender()
+    tileMemory.configure(this.gpu)
+    tileMemory.onRestored = () => this.requestRender()
+    clipMask.off = doc.isInfinite // legacy flag (smart selection checks it); the selection mask itself works on infinite docs through ClipCtx
     if (this.engine) this.engine.setDocument(doc)
     else this.engine = new BrushEngine(this.gpu, doc)
     const off1 = doc.events.on('change', ({ rect }) => this.markDirty(rect))
@@ -248,7 +270,29 @@ export class App implements ToolHost {
 
   fit(): void {
     if (!this.doc) return
+    if (this.doc.isInfinite) return this.fitContent(true)
     this.setView(fitView(this.doc.width, this.doc.height, this.cssW, this.cssH, 48, this.view.mirror))
+  }
+
+  /**
+   * Infinite canvas: fit the painted content (tight bounds of the visible layers). With `restore`, a document that was saved with a view
+   * (and is being (re)opened) goes back to it; an empty canvas shows the origin at 100%.
+   */
+  fitContent(restore = false): void {
+    const doc = this.doc
+    if (!doc.isInfinite) return this.fit()
+    const saved = restore ? doc.infinite.view : undefined
+    if (saved) return this.setView({ cx: saved.cx, cy: saved.cy, zoom: saved.zoom, rot: 0, ...(this.view.mirror ? { mirror: true } : {}) })
+    const b = doc.contentBounds({ tight: true, visibleOnly: true })
+    if (!b) return this.setView({ cx: 0, cy: 0, zoom: 1, rot: 0, ...(this.view.mirror ? { mirror: true } : {}) })
+    const v = fitView(Math.max(b.w, 1), Math.max(b.h, 1), this.cssW, this.cssH, 48, this.view.mirror)
+    this.setView({ ...v, cx: b.x + b.w / 2, cy: b.y + b.h / 2, zoom: Math.min(v.zoom, 1) })
+  }
+
+  /** Infinite canvas: put the document origin (0,0) back at the centre of the screen. */
+  goToOrigin(): void {
+    if (!this.doc.isInfinite) return this.fit()
+    this.setView({ ...this.view, cx: 0, cy: 0 })
   }
 
   cssSize(): { w: number; h: number } {
@@ -283,8 +327,8 @@ export class App implements ToolHost {
     if (!this.raf) this.raf = requestAnimationFrame(this.frame)
   }
 
-  private frame = (): void => {
-    this.raf = 0
+  /** Compose what changed since the last frame into the compositor now (the time-lapse capture must show the state it is tagged with). */
+  syncComposite(): void {
     const live = this.engine.live
     const dirty = unionRect(this.engine.takeDirty(), this.pending)
     this.pending = null
@@ -292,6 +336,11 @@ export class App implements ToolHost {
       this.compositor.compose(live, null)
       this.fullDirty = false
     } else if (dirty) this.compositor.compose(live, dirty)
+  }
+
+  private frame = (): void => {
+    this.raf = 0
+    this.syncComposite()
     this.compositor.present(this.view, this.cssW, this.cssH, this.dpr)
   }
 

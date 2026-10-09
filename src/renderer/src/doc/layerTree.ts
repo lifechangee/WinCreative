@@ -8,6 +8,10 @@ export interface TreeItem {
   id: string
   parentId: string | null
   isGroup: boolean
+  /** language layer group (children = per-language cells, shown as ONE row) */
+  langSet?: boolean
+  /** language cell code ('' / undefined = common) */
+  lang?: string
 }
 
 export const MAX_GROUP_DEPTH = 6
@@ -98,7 +102,7 @@ export function displayRows<T extends TreeItem & { collapsed: boolean }>(layers:
     for (let i = sibs.length - 1; i >= 0; i--) {
       const l = sibs[i]
       rows.push({ layer: l, depth })
-      if (l.isGroup && !l.collapsed) walk(l.id, depth + 1)
+      if (l.isGroup && !l.collapsed && !l.langSet) walk(l.id, depth + 1)
     }
   }
   walk(null, 0)
@@ -117,6 +121,13 @@ export function moveRelative<T extends TreeItem>(layers: readonly T[], id: strin
   if (isDescendant(layers, refId, id)) return null
   const parentId = where === 'into' ? (ref.isGroup ? ref.id : null) : ref.parentId
   if (where === 'into' && !ref.isGroup) return null
+  // language layers: cells live only inside their langSet group (never dragged out), and a langSet group takes nothing but cells
+  // (no ordinary layer, no group, no other language layer inside it)
+  const target = parentId ? layers.find((l) => l.id === parentId) : undefined
+  if (x.lang && !target?.langSet) return null
+  if (x.lang && x.parentId && target?.id !== x.parentId) return null
+  if (target?.langSet && (!x.lang || x.isGroup)) return null
+  if (x.langSet && target && (target.langSet || layers.some((l) => l.langSet && l.id !== x.id && isDescendant(layers, target.id, l.id)))) return null
   if (parentId !== null && x.isGroup) {
     if (depthOf(layers, parentId) + 1 + subtreeHeight(layers, id) >= MAX_GROUP_DEPTH) return null
   }

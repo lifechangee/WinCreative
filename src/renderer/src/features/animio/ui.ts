@@ -57,6 +57,9 @@ export interface Modal {
   onLang(cb: () => void): void
 }
 
+/** open modals, newest last: Escape closes only the topmost one (a dialog opened from another dialog) */
+const openModals: object[] = []
+
 /** Simple centered modal dialog. */
 export function modal(title: string | I18nRef, onClose?: () => void): Modal {
   ensureStyles()
@@ -68,15 +71,18 @@ export function modal(title: string | I18nRef, onClose?: () => void): Modal {
     unsubs.forEach((u) => u())
     bg.remove()
     document.removeEventListener('keydown', onKey, true)
+    const i = openModals.indexOf(bg)
+    if (i >= 0) openModals.splice(i, 1)
     onClose?.()
   }
   const onKey = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') {
       e.stopPropagation()
-      close()
+      if (openModals[openModals.length - 1] === bg) close()
     }
   }
   document.addEventListener('keydown', onKey, true)
+  openModals.push(bg)
   const x = h('button', { class: 'an-btn small', icon: 'clear', iconSize: 14, onclick: close })
   const box = h('div', { class: 'an-modal' }, h('header', null, h('span', { text: title }), x), body, footer)
   bg.append(box)

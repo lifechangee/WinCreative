@@ -28,6 +28,8 @@ const dict: Record<string, string> = {
   'guides.panel.segments': 'Segments',
   'guides.panel.rotationalSymmetryNoMirroring': 'Rotational symmetry (no mirroring)',
   'guides.panel.dragTheCentreAnd': 'Drag the centre and the rotation handle on the canvas.',
+  'guides.panel.gridOriginHere': 'Grid origin here',
+  'guides.panel.gridOriginTip': 'Move the grid origin to the frame centre (or the view centre when there is no frame)',
   'guides.panel.resetAxis': 'Reset axis',
   'guides.panel.drawingAssist': 'Drawing Assist',
   'guides.panel.assistedDrawingActiveLayer': 'Assisted Drawing (active layer)',

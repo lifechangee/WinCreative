@@ -20,8 +20,21 @@ All licenses listed here are compatible with AGPL-3.0-or-later. No incompatible 
 | pako (via pdf-lib, ag-psd, utif) | 2.1.0 | MIT AND Zlib | https://github.com/nodeca/pako |
 | base64-js (via ag-psd) | 1.5.1 | MIT | https://github.com/beatgammit/base64-js |
 | tslib (via pdf-lib) | 2.8.1 | 0BSD | https://github.com/microsoft/tslib |
+| onnxruntime-web (ONNX Runtime Web: WebGPU/WASM runtime, shipped as `ort/*.jsep.{mjs,wasm}`) | 1.30.0 | MIT | https://github.com/microsoft/onnxruntime |
+| **MobileSAM** model (ONNX export by Acly: `mobile_sam_image_encoder.onnx`, `sam_mask_decoder_multi.onnx`), bundled | rev 0d3b403 | Apache-2.0 (model); MIT (ONNX export repository) | https://github.com/ChaoningZhang/MobileSAM , https://huggingface.co/Acly/MobileSAM |
+| **SAM 2.1 Hiera-Small** ONNX (optional download, not bundled) | rev a7df49d | Apache-2.0 (Meta) | https://github.com/facebookresearch/sam2 , https://huggingface.co/onnx-community/sam2.1-hiera-small-ONNX |
 | ffmpeg-static (npm wrapper) | 5.3.0 | GPL-3.0-or-later | https://github.com/eugeneware/ffmpeg-static |
 | **FFmpeg 6.1.1 Windows x64 binary** (gyan.dev "essentials" build) | 6.1.1 | **GPL-3.0** (the build enables GPL components such as libx264) | https://www.gyan.dev/ffmpeg/builds/ |
+
+### Smart selection models
+
+* **MobileSAM** (Zhang et al., "Faster Segment Anything: Towards Lightweight SAM for Mobile Applications") is Apache-2.0; the ONNX conversion by Acly is
+  MIT-licensed. Files are bundled in `resources/models/fast` (SHA-256 `580f5fb6...760cc749` encoder, `8976b90a...2ffe` decoder, listed in full in
+  `src/renderer/src/features/smartselect/models.json`). License text: `resources/licenses/MobileSAM-Apache-2.0.txt`.
+* **SAM 2.1** (Meta AI, Apache-2.0) in the ONNX conversion of the `onnx-community` organisation is downloaded **only when the user clicks Download**, from the
+  commit-pinned URLs in `models.json`, checked against the listed size and SHA-256 and stored in `<userData>/models`. License text: `resources/licenses/SAM2-Apache-2.0.txt`.
+* **ONNX Runtime** (Microsoft, MIT): `resources/licenses/onnxruntime-MIT.txt`.
+* No non-commercial-licensed model (e.g. RMBG) is used.
 
 The full license texts of Electron/Chromium are shipped by the installer as `LICENSE.electron.txt` and `LICENSES.chromium.html`
 next to the application executable.

@@ -313,7 +313,7 @@ export class Coach {
   /** Things on screen the card must not cover (the popover the user is picking from, tool bars, QuickMenu...). */
   private obstacles(): DOMRect[] {
     const out: DOMRect[] = []
-    for (const el of document.querySelectorAll<HTMLElement>('.popover, .sx-bar, .adj-bar, .adj-panel, .qm, .op-popup')) {
+    for (const el of document.querySelectorAll<HTMLElement>('.popover, .sx-bar, .ss-bar, .adj-bar, .adj-panel, .qm, .op-popup')) {
       if (el.style.display === 'none') continue
       const r = el.getBoundingClientRect()
       if (r.width > 4 && r.height > 4) out.push(r)

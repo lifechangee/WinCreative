@@ -1,9 +1,12 @@
+import { clipImageToFrame } from '../frame/clip'
 import { t } from '../../i18n'
 import type { Rect } from '../../core/types'
+import { TILE, TileKey, intRect, regionPieces, tileKey, tileKeyX, tileKeyY, tilesIn } from '../../core/tiles'
 import type { Document } from '../../doc/document'
 import type { Layer } from '../../doc/layer'
+import { newInfMask } from '../../doc/maskStore'
 import { StackRenderer } from '../../gl/compositor'
-import { clipMask } from '../../gl/clipMask'
+import { bindClipMask, clipMask } from '../../gl/clipMask'
 import type { Surface } from '../../gl/gpu'
 import { FS_VERT } from '../../gl/shaders'
 import { LAYER_OP_FS } from '../../gl/layerShaders'
@@ -12,9 +15,16 @@ import { LAYER_OP_FS } from '../../gl/layerShaders'
  * Optional integration points other features may set.
  *  - beginTransform(layer): called after a layer was pasted / inserted so the transform tool can pick it up
  *  - addText(): create a text layer (Text feature)
+ *  - workRect(): infinite canvas, the doc-space rect "whole layer" operations act on (frame, else visible area)
+ *  - selectionBounds(): tight bounds of the active selection (null = none)
  * A DOM CustomEvent 'bw:layer-inserted' ({detail:{layerId}}) is dispatched as well.
  */
-export const layerHooks: { beginTransform: ((layer: Layer) => void) | null; addText: (() => void) | null } = { beginTransform: null, addText: null }
+export const layerHooks: {
+  beginTransform: ((layer: Layer) => void) | null
+  addText: (() => void) | null
+  workRect: (() => Rect) | null
+  selectionBounds: (() => Rect | null) | null
+} = { beginTransform: null, addText: null, workRect: null, selectionBounds: null }
 
 export enum Op {
   Fill = 0,
@@ -31,26 +41,85 @@ interface OpOpts {
   color?: [number, number, number]
   alphaLock?: boolean
   mask?: Surface | null
+  /** infinite canvas: texture of the mask tile belonging to the tile being processed */
+  maskTex?: WebGLTexture | null
   /** honour the current selection (clipMask) */
   useSelection?: boolean
 }
 
 const fullRect = (doc: Document): Rect => ({ x: 0, y: 0, w: doc.width, h: doc.height })
+const tileCtx = (tx: number, ty: number): { x: number; y: number; w: number; h: number } => ({ x: tx * TILE, y: ty * TILE, w: TILE, h: TILE })
 
-/** Run a layer op reading `src` and writing `dst` (different surfaces). */
-export function opToSurface(doc: Document, src: Surface, dst: Surface, o: OpOpts): void {
+/** Run a layer op reading `src` and writing `dst` (different surfaces). `ctx`: where `dst` lives in document space (infinite canvas tiles). */
+export function opToSurface(doc: Document, src: Surface | null, dst: Surface, o: OpOpts, ctx?: { x: number; y: number; w: number; h: number }): void {
   const gpu = doc.gpu
   const gl = gpu.gl
   const p = gpu.program('layer-op', FS_VERT, LAYER_OP_FS).use()
-  const sel = o.useSelection === false ? null : clipMask.tex
-  gpu.bindTex(0, src.tex)
-  gpu.bindTex(1, o.mask ? o.mask.tex : gpu.blank)
-  gpu.bindTex(2, sel ?? gpu.blank)
+  gpu.bindTex(0, src ? src.tex : gpu.blank)
+  gpu.bindTex(1, o.maskTex ?? (o.mask ? o.mask.tex : gpu.blank))
   const c = o.color ?? [0, 0, 0]
-  p.i('uSrc', 0).i('uMask', 1).i('uSel', 2).f('uSelOn', sel ? 1 : 0).i('uOp', o.op).v3('uColor', c[0], c[1], c[2]).f('uAlphaLock', o.alphaLock ? 1 : 0)
+  p.i('uSrc', 0).i('uMask', 1).i('uOp', o.op).v3('uColor', c[0], c[1], c[2]).f('uAlphaLock', o.alphaLock ? 1 : 0)
+  if (o.useSelection !== false && clipMask.tex) bindClipMask(gpu, p, ctx)
+  else {
+    gpu.bindTex(4, gpu.blank)
+    p.i('uSelMask', 4).f('uSelOn', 0)
+  }
+  p.f('uFrameOn', 0)
   gl.disable(gl.BLEND)
   gpu.bindTarget(dst, null)
   gpu.fullscreen()
+}
+
+// ---------------------------------------------------------------- infinite canvas: tile-wise ops
+/** The rect whole-layer ops use on an infinite canvas: the selection bounds when there is a selection, else the work rect. */
+function infRect(doc: Document): Rect {
+  const sel = clipMask.tex ? layerHooks.selectionBounds?.() : null
+  if (sel) return sel
+  return layerHooks.workRect?.() ?? doc.contentBounds() ?? { x: 0, y: 0, w: 1024, h: 1024 }
+}
+
+function maskTexFor(doc: Document, layer: Layer, key: TileKey): WebGLTexture {
+  const m = layer.maskTiles?.getKey(key)
+  return m ? m.tex : layer.maskFill ? doc.gpu.white : doc.gpu.blank
+}
+
+/**
+ * Undoable op over the tiles of a layer's pixels (or mask). `rect` = tiles to process (null = every existing tile);
+ * `existingOnly` = skip tiles that do not exist yet (otherwise they are allocated - and freed again when they end up empty).
+ */
+function runOpInf(doc: Document, layer: Layer, label: string, type: 'layer-fill' | 'layer-invert' | 'layer-mask' | 'clear', o: OpOpts, onMask: boolean, rect: Rect | null, existingOnly: boolean): boolean {
+  const store = onMask ? layer.maskTiles : layer.tiles
+  if (!store) return false
+  const gpu = doc.gpu
+  const coords = rect
+    ? tilesIn(intRect(rect)).filter((c) => !existingOnly || store.has(c.tx, c.ty))
+    : [...store.keys()].map((k) => ({ tx: tileKeyX(k), ty: tileKeyY(k) }))
+  if (!coords.length) return false
+  const prev = layer.editingMask
+  layer.editingMask = onMask
+  const edit = doc.beginPixelEdit(layer, label)
+  layer.editingMask = prev
+  try {
+    for (const c of coords) {
+      edit.saveKey(tileKey(c.tx, c.ty))
+      store.ensure(c.tx, c.ty) // allocate before any texture is bound
+    }
+    const scratch = gpu.surface(TILE, TILE, store.fmt, 0)
+    for (const c of coords) {
+      const tile = store.ensure(c.tx, c.ty)
+      gpu.blit(tile, { x: 0, y: 0, w: TILE, h: TILE }, scratch, 0, 0)
+      const maskTex = o.op === Op.ApplyMask ? maskTexFor(doc, layer, tileKey(c.tx, c.ty)) : null
+      opToSurface(doc, scratch, tile, { ...o, maskTex }, tileCtx(c.tx, c.ty))
+    }
+    scratch.dispose()
+    if (!onMask) for (const k of store.emptyAmong(edit.savedKeys())) edit.removeKey(k)
+  } catch (e) {
+    edit.abort()
+    throw e
+  }
+  const dirty = edit.finish()
+  doc.emitCommit(type, layer.id, dirty, label)
+  return true
 }
 
 /** Undoable in-place op on a layer's pixels (or its mask when `onMask`). */
@@ -75,22 +144,60 @@ function runOp(doc: Document, layer: Layer, label: string, type: 'layer-fill' | 
 }
 
 export function fillLayer(doc: Document, layer: Layer, color: [number, number, number]): boolean {
+  if (doc.isInfinite) {
+    if (layer.isGroup || layer.locked) return false
+    const onMask = layer.editingMask && !!layer.mask
+    return runOpInf(doc, layer, onMask ? 'Fill mask' : 'Fill layer', 'layer-fill', { op: Op.Fill, color, alphaLock: !onMask && layer.alphaLock }, onMask, infRect(doc), !onMask && layer.alphaLock)
+  }
   if (layer.editingMask && layer.mask) return runOp(doc, layer, 'Fill mask', 'layer-fill', { op: Op.Fill, color }, true)
   return runOp(doc, layer, 'Fill layer', 'layer-fill', { op: Op.Fill, color, alphaLock: layer.alphaLock })
 }
 
 export function invertLayer(doc: Document, layer: Layer): boolean {
+  if (doc.isInfinite) {
+    if (layer.isGroup || layer.locked) return false
+    if (layer.editingMask && layer.mask) return invertMask(doc, layer)
+    return runOpInf(doc, layer, 'Invert colors', 'layer-invert', { op: Op.InvertColors }, false, clipMask.tex ? infRect(doc) : null, true)
+  }
   if (layer.editingMask && layer.mask) return runOp(doc, layer, 'Invert mask', 'layer-invert', { op: Op.InvertMask, useSelection: false }, true)
   return runOp(doc, layer, 'Invert colors', 'layer-invert', { op: Op.InvertColors })
 }
 
+/** Infinite mask: the mask is replaced (structural, undoable) by an inverted copy - every tile inverted, the fill value flipped. */
+function invertMaskInf(doc: Document, layer: Layer): boolean {
+  const old = layer.mask!
+  const src = layer.maskTiles!
+  const gpu = doc.gpu
+  const ns = newInfMask(gpu, src.fmt, layer.maskFill ? 0 : 1)
+  const dst = ns.inf!
+  const keys = [...src.keys()]
+  for (const k of keys) dst.ensureKey(k)
+  const scratch = gpu.surface(TILE, TILE, src.fmt, 0)
+  for (const k of keys) {
+    const s = src.getKey(k)!
+    const d = dst.ensureKey(k)
+    gpu.blit(s, { x: 0, y: 0, w: TILE, h: TILE }, scratch, 0, 0)
+    opToSurface(doc, scratch, d, { op: Op.InvertMask, useSelection: false })
+  }
+  scratch.dispose()
+  const keep = { editing: layer.editingMask, enabled: layer.maskEnabled, view: layer.maskView }
+  doc.setMask(layer.id, ns, 'Invert mask')
+  layer.editingMask = keep.editing
+  layer.maskEnabled = keep.enabled
+  layer.maskView = keep.view
+  void old
+  return true
+}
+
 export function invertMask(doc: Document, layer: Layer): boolean {
+  if (doc.isInfinite) return !!layer.mask && !layer.locked && invertMaskInf(doc, layer)
   return runOp(doc, layer, 'Invert mask', 'layer-mask', { op: Op.InvertMask, useSelection: false }, true)
 }
 
 /** Clear mask = everything hidden (black). */
 export function clearMask(doc: Document, layer: Layer): boolean {
   if (!layer.mask) return false
+  if (doc.isInfinite) return setInfMaskFill(doc, layer, 0, 'Clear mask')
   const prev = layer.editingMask
   layer.editingMask = true
   const edit = doc.beginPixelEdit(layer, 'Clear mask')
@@ -110,6 +217,7 @@ export function clearMask(doc: Document, layer: Layer): boolean {
 /** Fill the mask with white (show everything). */
 export function fillMaskWhite(doc: Document, layer: Layer): boolean {
   if (!layer.mask) return false
+  if (doc.isInfinite) return setInfMaskFill(doc, layer, 1, 'Reveal all')
   const prev = layer.editingMask
   layer.editingMask = true
   const edit = doc.beginPixelEdit(layer, 'Reveal all')
@@ -125,12 +233,23 @@ export function fillMaskWhite(doc: Document, layer: Layer): boolean {
   return true
 }
 
+/** Infinite mask reset to a uniform value: a fresh empty mask store replaces the old one (one undo step, nothing to copy). */
+function setInfMaskFill(doc: Document, layer: Layer, fill: 0 | 1, label: string): boolean {
+  const keep = { editing: layer.editingMask, enabled: layer.maskEnabled, view: layer.maskView }
+  doc.setMask(layer.id, newInfMask(doc.gpu, layer.tiles!.fmt, fill), label)
+  layer.editingMask = keep.editing
+  layer.maskEnabled = keep.enabled
+  layer.maskView = keep.view
+  return true
+}
+
 /** Bake the mask into the pixels and remove it (one undo step). */
 export function applyMask(doc: Document, layer: Layer): boolean {
   if (!layer.mask || layer.isGroup || layer.locked) return false
   const mask = layer.mask
   doc.transaction('Apply mask', 'layer-mask', layer.id, () => {
-    runOp(doc, layer, 'Apply mask', 'layer-mask', { op: Op.ApplyMask, mask, useSelection: false })
+    if (doc.isInfinite) runOpInf(doc, layer, 'Apply mask', 'layer-mask', { op: Op.ApplyMask, useSelection: false }, false, null, true)
+    else runOp(doc, layer, 'Apply mask', 'layer-mask', { op: Op.ApplyMask, mask, useSelection: false })
     doc.setMask(layer.id, null, 'Apply mask')
   })
   return true
@@ -141,8 +260,17 @@ export function addMask(doc: Document, layer: Layer, fill: 'white' | 'black' | '
   if (layer.mask) return false
   let surf: Surface
   if (fill === 'selection' && clipMask.tex) {
-    surf = doc.createMaskSurface(false)
-    opToSurface(doc, doc.scratch, surf, { op: Op.SelectionToMask })
+    if (doc.isInfinite) {
+      surf = newInfMask(doc.gpu, layer.tiles?.fmt ?? doc.format, 0)
+      const store = surf.inf!
+      const win = clipMask.win
+      const coords = win ? tilesIn(win) : []
+      for (const c of coords) store.ensure(c.tx, c.ty)
+      for (const c of coords) opToSurface(doc, null, store.ensure(c.tx, c.ty), { op: Op.SelectionToMask }, tileCtx(c.tx, c.ty))
+    } else {
+      surf = doc.createMaskSurface(false)
+      opToSurface(doc, doc.scratch, surf, { op: Op.SelectionToMask })
+    }
   } else surf = doc.createMaskSurface(fill !== 'black')
   doc.setMask(layer.id, surf)
   return true
@@ -153,15 +281,40 @@ type Proxy = Layer
 
 const proxy = (l: Layer, over: Partial<Layer>): Proxy => Object.assign(Object.create(l), over) as Proxy
 
-function renderTo(doc: Document, items: Layer[]): Surface {
-  const dest = doc.gpu.surface(doc.width, doc.height, doc.format)
+/** Result of rendering a layer list: one canvas-sized surface (fixed) or one surface per tile (infinite). */
+type Rendered = { surf: Surface } | { tiles: Map<TileKey, Surface> }
+
+function renderTo(doc: Document, items: Layer[], lang?: string): Rendered {
   const r = new StackRenderer(doc.gpu, () => doc)
+  if (lang) r.lang = lang // language variants: render as this language (default: the view language)
   try {
-    r.render(items, dest, null, null)
+    if (!doc.isInfinite) {
+      const dest = doc.gpu.surface(doc.width, doc.height, doc.format)
+      r.render(items, dest, null, null)
+      return { surf: dest }
+    }
+    const keys = new Set<TileKey>()
+    const all: Layer[] = []
+    for (const l of items) {
+      all.push(l)
+      if (l.isGroup) all.push(...doc.descendantsOf(l.id))
+    }
+    for (const l of all) if (!l.isGroup && l.tiles) for (const k of l.tiles.keys()) keys.add(k)
+    const tiles = new Map<TileKey, Surface>()
+    for (const k of keys) {
+      const dest = doc.gpu.surface(TILE, TILE, doc.format)
+      tiles.set(k, dest)
+      r.renderTile(items, k, dest, null, null)
+    }
+    return { tiles }
   } finally {
     r.dispose()
   }
-  return dest
+}
+
+const disposeRendered = (x: Rendered): void => {
+  if ('surf' in x) x.surf.dispose()
+  else for (const s of x.tiles.values()) s.dispose()
 }
 
 /** Layer directly below `id` among its siblings, if it is a plain layer. */
@@ -173,15 +326,42 @@ export function layerBelow(doc: Document, id: string): Layer | null {
   return i > 0 ? sibs[i - 1] : null
 }
 
-function copyInto(doc: Document, layer: Layer, src: Surface, label: string): void {
+function copyInto(doc: Document, layer: Layer, src: Rendered, label: string): void {
   const prev = layer.editingMask
   layer.editingMask = false
   const edit = doc.beginPixelEdit(layer, label)
+  layer.editingMask = prev
+  if ('tiles' in src) {
+    const store = layer.tiles!
+    const gpu = doc.gpu
+    const keys = new Set<TileKey>([...store.keys(), ...src.tiles.keys()])
+    for (const k of keys) edit.saveKey(k)
+    for (const k of src.tiles.keys()) store.ensureKey(k) // allocate before binding
+    for (const k of keys) {
+      const t = store.getKey(k)
+      const r = src.tiles.get(k)
+      if (r && t) gpu.blit(r, { x: 0, y: 0, w: TILE, h: TILE }, t, 0, 0)
+      else if (t) gpu.clear(t)
+    }
+    for (const k of store.emptyAmong(edit.savedKeys())) edit.removeKey(k)
+    const dirty = edit.finish()
+    if (dirty) doc.events.emit('change', { rect: dirty })
+    return
+  }
   const full = fullRect(doc)
   edit.save(full)
-  doc.gpu.blit(src, full, layer.pixels, 0, 0)
+  doc.gpu.blit(src.surf, full, layer.pixels, 0, 0)
   edit.finish()
-  layer.editingMask = prev
+}
+
+/** Fill the (new, empty) layer `nl` with a rendering. */
+function fillLayerFrom(doc: Document, nl: Layer, src: Rendered): void {
+  if ('tiles' in src) {
+    const store = nl.tiles!
+    for (const k of src.tiles.keys()) store.ensureKey(k)
+    for (const [k, s] of src.tiles) doc.gpu.blit(s, { x: 0, y: 0, w: TILE, h: TILE }, store.ensureKey(k), 0, 0)
+    store.prune()
+  } else doc.gpu.blit(src.surf, fullRect(doc), nl.pixels, 0, 0)
 }
 
 /**
@@ -218,8 +398,39 @@ export function mergeDown(doc: Document, id: string, combine = false): string | 
       })
     })
   } finally {
-    tmp.dispose()
+    disposeRendered(tmp)
   }
+  return null
+}
+
+/**
+ * Merge Down for a language layer: the layer below must be a language layer too; every language's cell is composited onto the same language's
+ * cell of the lower row (created when missing), with the upper row's opacity / blend mode applied. The upper row disappears.
+ */
+export function mergeLangDown(doc: Document, id: string): string | null {
+  const up = doc.getLayer(id)
+  if (!up?.langSet) return t('layers.toast.noLayer')
+  const low = layerBelow(doc, id)
+  if (!low) return t('layers.toast.noLayerBelow')
+  if (!low.langSet) return t('langs.toast.mergeNeedsLang')
+  if (low.locked || up.locked) return t('layers.toast.layerLocked')
+  const upBlend = up.passThrough ? 'normal' : up.blendMode
+  doc.transaction('Merge language layers', 'layer-merge', low.id, () => {
+    for (const l of doc.langs) {
+      const uc = doc.cellOf(up.id, l.code)
+      if (!uc) continue
+      const lc = doc.ensureCell(low, l.code)
+      const lowP = proxy(lc, { opacity: 1, blendMode: 'normal', clipping: false, visible: true, maskView: false, parentId: null })
+      const upP = proxy(uc, { opacity: uc.opacity * up.opacity, blendMode: upBlend as Layer['blendMode'], visible: true, maskView: false, parentId: null })
+      const tmp = renderTo(doc, [lowP, upP], l.code)
+      try {
+        copyInto(doc, lc, tmp, 'Merge language layers')
+      } finally {
+        disposeRendered(tmp)
+      }
+    }
+    doc.replaceLayers([...doc.descendantsOf(up.id), up], null, null, low.id, 'Merge language layers', 'layer-merge')
+  })
   return null
 }
 
@@ -238,20 +449,22 @@ export function mergeLayers(doc: Document, ids: string[]): string | null {
       doc.replaceLayers(layers.slice(1), null, null, base.id, 'Merge layers', 'layer-merge')
     })
   } finally {
-    tmp.dispose()
+    disposeRendered(tmp)
   }
   return null
 }
 
 /** Flatten a group into one layer that replaces it (group opacity/blend/mask carried over). */
-export function mergeGroup(doc: Document, id: string): string | null {
+export function mergeGroup(doc: Document, id: string, force = false): string | null {
   const g = doc.getLayer(id)
   if (!g || !g.isGroup) return t('layers.toast.notGroup')
+  // a language layer (or a group holding one) would be flattened into the VIEW language only and lose the other languages' cells
+  if (!force && (g.langSet || doc.descendantsOf(id).some((d) => d.langSet))) return t('langs.toast.mergeRefused')
   const kids = doc.childrenOf(id)
   const tmp = renderTo(doc, kids.map((k) => k))
   const nl = doc.createLayer({ name: g.name, opacity: g.opacity, blendMode: g.passThrough ? 'normal' : g.blendMode, visible: g.visible, locked: g.locked, alphaLock: g.alphaLock, clipping: false })
-  doc.gpu.blit(tmp, fullRect(doc), nl.pixels, 0, 0)
-  tmp.dispose()
+  fillLayerFrom(doc, nl, tmp)
+  disposeRendered(tmp)
   nl.mask = g.mask
   nl.maskEnabled = g.maskEnabled
   const removed = [...doc.descendantsOf(id), g]
@@ -260,12 +473,13 @@ export function mergeGroup(doc: Document, id: string): string | null {
 }
 
 /** Flatten every visible layer into one. Hidden layers are discarded. */
-export function flattenAll(doc: Document): string | null {
+export function flattenAll(doc: Document, force = false): string | null {
   if (doc.layers.length < 2) return t('layers.toast.nothingToFlatten')
+  if (!force && doc.hasLangLayers) return t('langs.toast.flattenRefused')
   const tmp = renderTo(doc, doc.childrenOf(null))
   const nl = doc.createLayer({ name: t('layers.flattened') })
-  doc.gpu.blit(tmp, fullRect(doc), nl.pixels, 0, 0)
-  tmp.dispose()
+  fillLayerFrom(doc, nl, tmp)
+  disposeRendered(tmp)
   doc.replaceLayers([...doc.layers], nl, null, nl.id, 'Flatten', 'layer-flatten')
   return null
 }
@@ -308,6 +522,26 @@ export function cropToAlpha(data: Uint8ClampedArray, w: number, h: number): Pixe
 /** The layer's pixels (restricted to the selection when there is one), cropped to content. */
 export function readLayerImage(doc: Document, layer: Layer, useSelection = true): PixelImage | null {
   if (layer.isGroup) return null
+  if (doc.isInfinite) {
+    const sel = useSelection && clipMask.tex ? (layerHooks.selectionBounds?.() ?? null) : null
+    const b = sel ?? layer.tiles?.tightBounds() ?? null
+    if (!b) return null
+    const max = doc.gpu.maxTexture
+    const r = { x: b.x, y: b.y, w: Math.min(b.w, max), h: Math.min(b.h, max) }
+    const src = doc.readRegion(layer, r)
+    let tmp: Surface | null = null
+    let from = src
+    if (sel) {
+      tmp = doc.gpu.surface(r.w, r.h, src.fmt, 0)
+      opToSurface(doc, src, tmp, { op: Op.KeepSelection }, { x: r.x, y: r.y, w: r.w, h: r.h })
+      from = tmp
+    }
+    const px = doc.gpu.readRGBA8(from, { x: 0, y: 0, w: r.w, h: r.h })
+    src.dispose()
+    tmp?.dispose()
+    const c = cropToAlpha(px, r.w, r.h)
+    return c ? { ...c, x: c.x + r.x, y: c.y + r.y } : null
+  }
   const full = fullRect(doc)
   let src: Surface = layer.pixels
   let tmp: Surface | null = null
@@ -323,15 +557,39 @@ export function readLayerImage(doc: Document, layer: Layer, useSelection = true)
 
 /** Erase the selected part of the layer (or all of it when nothing is selected) - undoable. */
 export function eraseSelected(doc: Document, layer: Layer, label = 'Cut'): boolean {
+  if (doc.isInfinite) {
+    if (layer.locked || layer.isGroup) return false
+    if (clipMask.tex) return runOpInf(doc, layer, label, 'clear', { op: Op.EraseSelection }, false, infRect(doc), true)
+    doc.clearLayer(layer.id)
+    return true
+  }
   if (clipMask.tex) return runOp(doc, layer, label, 'clear', { op: Op.EraseSelection })
   if (layer.locked || layer.isGroup) return false
   doc.clearLayer(layer.id)
   return true
 }
 
-/** Build a new full-size layer whose pixels are `img` placed at img.x/img.y (cropped to the canvas). */
-export function layerFromImage(doc: Document, img: PixelImage, name: string): Layer {
+/** Build a new full-size layer whose pixels are `img` placed at img.x/img.y (cropped to the canvas; infinite canvas: any size, split into tiles). */
+export function layerFromImage(doc: Document, src: PixelImage, name: string): Layer {
   const layer = doc.createLayer({ name })
+  const img = clipImageToFrame(doc, src) // frame ON: only what lands inside the frame is kept (features/frame)
+  if (!img) return layer
+  if (doc.isInfinite) {
+    const store = layer.tiles!
+    for (const p of regionPieces({ x: img.x, y: img.y, w: img.w, h: img.h })) {
+      const buf = new Uint8ClampedArray(p.w * p.h * 4)
+      let any = false
+      for (let y = 0; y < p.h; y++) {
+        const so = ((p.dy + y) * img.w + p.dx) * 4
+        const row = img.data.subarray(so, so + p.w * 4)
+        buf.set(row, y * p.w * 4)
+        if (!any) for (let i = 3; i < row.length; i += 4) if (row[i]) { any = true; break }
+      }
+      if (!any) continue
+      doc.gpu.uploadRGBA8(store.ensure(p.tx, p.ty), p.sx, p.sy, p.w, p.h, buf)
+    }
+    return layer
+  }
   const x0 = Math.max(0, img.x)
   const y0 = Math.max(0, img.y)
   const x1 = Math.min(doc.width, img.x + img.w)
@@ -353,9 +611,21 @@ export function layerFromImage(doc: Document, img: PixelImage, name: string): La
 }
 
 /** Insert a layer above the active one, notify transform hooks. */
-export function insertAndTransform(doc: Document, layer: Layer, label: string): void {
-  doc.insertLayer(layer, doc.getLayer(doc.activeId) ? { id: doc.activeId, where: 'above' } : null, label, 'layer-paste')
+export function insertAndTransform(doc: Document, layer: Layer, label: string): 'cell' | 'common-over-language' | 'plain' {
+  // language layer active and its view-language cell still empty: the pasted pixels BECOME that cell (language-specific writing);
+  // otherwise a pasted layer is an ordinary (common) layer above the active row
+  const g = doc.langSetOf(doc.getLayer(doc.activeId))
+  if (g && !doc.cellOf(g.id, doc.viewLang)) {
+    layer.lang = doc.viewLang
+    doc.insertLayer(layer, { id: g.id, where: 'into' }, label, 'layer-paste')
+    doc.activeId = g.id
+    notifyInserted(layer)
+    return 'cell'
+  }
+  const near = g ?? doc.getLayer(doc.activeId)
+  doc.insertLayer(layer, near ? { id: near.id, where: 'above' } : null, label, 'layer-paste')
   notifyInserted(layer)
+  return g ? 'common-over-language' : 'plain'
 }
 
 export function notifyInserted(layer: Layer): void {
@@ -375,8 +645,16 @@ export function selectionToNewLayer(doc: Document, layer: Layer, cut: boolean): 
     return doc.duplicateLayer(layer.id)
   }
   const nl = doc.createLayer({ name: layer.name + (cut ? t('core.doc.cutSuffix') : t('core.doc.copySuffix')), blendMode: layer.blendMode, opacity: layer.opacity })
-  opToSurface(doc, layer.pixels, nl.pixels, { op: Op.KeepSelection })
-  let result: Layer = nl
+  if (doc.isInfinite) {
+    const src = layer.tiles!
+    const dst = nl.tiles!
+    const b = layerHooks.selectionBounds?.() ?? null
+    const coords = b ? tilesIn(intRect(b)).filter((c) => src.has(c.tx, c.ty)) : []
+    for (const c of coords) dst.ensure(c.tx, c.ty)
+    for (const c of coords) opToSurface(doc, src.get(c.tx, c.ty)!, dst.ensure(c.tx, c.ty), { op: Op.KeepSelection }, tileCtx(c.tx, c.ty))
+    dst.prune()
+  } else opToSurface(doc, layer.pixels, nl.pixels, { op: Op.KeepSelection })
+  const result: Layer = nl
   try {
     doc.transaction(cut ? 'Cut & paste' : 'Duplicate', 'layer-paste', nl.id, () => {
       if (cut) eraseSelected(doc, layer, 'Cut')
